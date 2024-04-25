@@ -56,42 +56,65 @@ Copy the  `esmf-perlmutter-modulefile` into a directory named `esmf`
 Update the name of this file to `perlmutter-8.4.2`
 ```
    mv esmf-perlmutter-modulefile perlmutter-8.4.2
+```
 Update the paths in the file to point to where you installed PIO and ESMF
 ```
    vim perlmutter-8.4.2 
 ```
 
 ## 2. Clone ELM and WRF code 
-### Clone the WRF repository and checkout develop branch:
+Clone the WRF repository and checkout develop branch:
 ```
     git clone https://github.com/wrf-model/WRF.git WRF-ELM
     cd WRF-ELM
     git checkout develop
 ```
 
-### Clone the ELM repository:
+Clone the ELM repository:
 ```
-    git clone https://github.com/hhllbao93/E3SM.git ELM
+    git clone https://github.com/hhllbao93/ELM.git ELM
     cd ELM
-    ./manage_externals/checkout_externals 
 ```
 
 ## 3. Build ELM and its dependencies
-### In your ELM directory, build ELM and its dependencies. Currently we only support build WRF-ELM on Perlmutter with gnu
+In your ELM code directory, build ELM and its dependencies. Currently, we only support building WRF-ELM on Perlmutter with gnu
 ```
-    ./lilac/build_ctsm /PATH/TO/ELM/BUILD --machine perlmutter --compiler gnu
+    ./lilac/build_ctsm /PATH/TO/BUILD/ELM --machine perlmutter --compiler gnu
+```
+Changes need to be made in /PATH/TO/ELM_CODE/ccs_config/machines/config_machines.xml, especially
+```
+      <modules compiler="gnu">
+        <command name="load">PrgEnv-gnu/8.3.3</command>
+        <command name="load">gcc/11.2.0</command>
+        <command name="load">craype/2.7.20</command>
+        <command name="load">cpe/23.03</command>
+        <command name="load">cray-mpich/8.1.25</command>
+        <command name="load">cray-hdf5-parallel/1.12.2.3</command>
+        <command name="load">cray-netcdf-hdf5parallel/4.9.0.3</command>
+        <command name="load">cray-parallel-netcdf/1.12.3.3</command>
+        <command name="load">cmake/3.22.0</command>
+        <command name="load">libfabric</command>
+        <command name="load">cray-libsci/23.02.1.1</command>
+        <command name="use">/global/cfs/cdirs/m3878/hhllbao/esmf/modulefiles/</command>
+        <command name="load">esmf/perlmutter-8.4.2</command>
+      </modules>
 ```
 
 ## 4. Building WRF with ELM
-### Load the same modules and set the same environments as used for ELM build by sourcing elm_build_environment.sh for Bash:
+Load the same modules and set the same environments as used for ELM build by sourcing elm_build_environment.sh for Bash:
 ```
-    source elm_build_dir/elm_build_environment.sh
+    source elm_build_environment.sh
 ```
-### Set makefile variables from ELM needed for the WRF build by setting the following environment. For example for Bash
+Set makefile variables from ELM needed for the WRF build by setting the following environment. For example for Bash
 ```
-    export WRF_ELM_MKFILE=/glade/scratch/$USER/WRF-ELM/ELM/elm_build_dir/bld/elm.mk
+    export WRF_ELM_MKFILE=/PATH/TO/BUILD/ELM/ctsm.mk
 ```
-### Compile the code using build_WRF.sh
+configure WRF code with Compiler choice: 34; Nesting option: 1
+```
+    ./configure
+```
+Update configure.wrf based on example /PATH/TO/WRF/configure.wrf.example
+Compile the code using build_WRF.sh
 ```
     sh build_WRF.sh
 ```
