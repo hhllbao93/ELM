@@ -14,14 +14,15 @@ module dynVarTimeInterpMod
   ! data are fixed at their value from the last year in the file. If the last year on the
   ! file is X, then the data are fixed at this last value (and thus do not vary)
   ! throughout year X.
-  !
+  
   ! !USES:
   use shr_kind_mod   , only : r8 => shr_kind_r8
   use dynVarMod      , only : dyn_var_type
 
   implicit none
   private
-  !
+  save
+
   ! !PUBLIC TYPES:
   public :: dyn_var_time_interp_type
 
@@ -36,9 +37,10 @@ module dynVarTimeInterpMod
      integer :: time_index_upper  ! current time_index_upper curresponding to data_at_tupper
    contains
      generic :: get_current_data => &      ! Get the current value of the data
-          get_current_data_1d, get_current_data_2d
+          get_current_data_1d, get_current_data_2d, get_current_data_3d
      procedure :: get_current_data_1d  ! Get the current value of the data, for a 1-d variable
      procedure :: get_current_data_2d  ! Get the current value of the data, for a 2-d variable
+     procedure :: get_current_data_3d  ! Get the current value of the data, for a 3-d variable
      procedure :: read_data_if_needed  ! Read the next time slice of data, if necessary
   end type dyn_var_time_interp_type
 
@@ -56,17 +58,17 @@ contains
   type(dyn_var_time_interp_type) function constructor( &
        dyn_file, varname, dim1name, conversion_factor, &
        do_check_sums_equal_1, data_shape)
-    !
+    
     ! !DESCRIPTION:
     ! Creates an object of type dyn_var_time_interp_type. This also reads the first
     ! set of data.
-    !
+    
     ! Assumes that dyn_file has already been initialized.
-    !
+    
     ! !USES:
     use dynFileMod     , only : dyn_file_type
     use dynTimeInfoMod , only : time_info_type
-    !
+    
     ! !ARGUMENTS:
     type(dyn_file_type), target, intent(in) :: dyn_file ! file containing this variable
     character(len=*), intent(in) :: varname             ! variable name on file
@@ -108,29 +110,28 @@ contains
   ! The following specific procedures are NOT actually public, but they can be accessed
   ! via the generic type-bound procedure, get_current_data
 
-  ! DIMS 1,2
+  ! DIMS 1,2,3
   !-----------------------------------------------------------------------
   subroutine get_current_data_{DIMS}d(this, cur_data)
-    !
+    
     ! !DESCRIPTION:
     ! Get the current, interpolated value of the data, in cur_data. cur_data should have
     ! the same dimensionality as the underlying data, as given by the data_shape argument
     ! that was passed to the constructor.
-    ! 
+     
     ! If necessary, new data are read from the file.
-    !
+    
     ! Should be called once per time step, AFTER calling set_current_year on the
     ! underlying dyn_file variable
-    !
+    
     ! !USES:
-    use dynFileMod     , only : dyn_file_type
-    !
+    use clm_time_manager, only : get_curr_yearfrac
+    
     ! !ARGUMENTS:
     class(dyn_var_time_interp_type) , intent(inout) :: this             ! this object
     real(r8)                        , intent(out)   :: cur_data{DIMSTR} ! current value of data
-    !
+    
     ! !LOCAL VARIABLES:
-    type(dyn_file_type), pointer :: dyn_file ! the dyn_file of this object
     integer               :: ndims          ! ndims of data in 'this'
     real(r8)              :: wt1            ! weight of time1 (the left-hand time point)
     real(r8), allocatable :: cur_data_1d(:) ! 1-d version of data at the current time
@@ -146,10 +147,7 @@ contains
     ! time 2
     call this%read_data_if_needed()
     allocate(cur_data_1d(size(this%data_at_tlower)))
-
-    dyn_file => this%get_dyn_file()
-    wt1 = 1.0_r8 - dyn_file%time_info%get_yearfrac()
-
+    wt1 = 1.0_r8 - get_curr_yearfrac()
     cur_data_1d(:) = this%data_at_tupper(:) + wt1*(this%data_at_tlower(:) - this%data_at_tupper(:))
     cur_data = reshape(cur_data_1d, shape(cur_data))
     deallocate(cur_data_1d)
@@ -162,21 +160,21 @@ contains
 
   !-----------------------------------------------------------------------
   subroutine read_data_if_needed(this)
-    !
+    
     ! !DESCRIPTION:
     ! Determine if new data need to be read from the file; if so, read them.
-    ! 
+     
     ! We need to read new data (or at least copy them) if the current time on dyn_file
     ! disagrees with the time for which we currently have stored data, for either time time_index_lower
     ! or time time_index_upper
-    !
+    
     ! !USES:
     use dynFileMod     , only : dyn_file_type
     use dynTimeInfoMod , only : time_info_type
-    !
+    
     ! !ARGUMENTS:
     class(dyn_var_time_interp_type), intent(inout) :: this   ! this object
-    !
+    
     ! !LOCAL VARIABLES:
     type(dyn_file_type), pointer :: dyn_file ! the dyn_file of this object
     integer :: time_index_lower_cur                       ! current value of time_index_lower on dyn_fileb

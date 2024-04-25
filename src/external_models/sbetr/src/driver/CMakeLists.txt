@@ -1,0 +1,5 @@
+add_subdirectory(shared)
+add_subdirectory(elm)
+add_subdirectory(clm)
+add_subdirectory(standalone)
+add_subdirectory(main)

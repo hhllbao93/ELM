@@ -5,14 +5,15 @@ module dynEDMod
   use shr_kind_mod   , only : r8 => shr_kind_r8
   use decompMod      , only : bounds_type
   use landunit_varcon, only : istsoil
-  use PatchType      , only : patch
-  use ColumnType     , only : col
+  use VegetationType      , only : veg_pp
+  use ColumnType     , only : col_pp
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   implicit none
   private
-  !
-  public :: dyn_ED     ! transfers weights calculated internally by fates into wtcol. 
+  save
+
+  public :: dyn_ED     ! transfers weights calculated internally by ED into wtcol. 
   !------------------------------------------------------------------------
  
 contains
@@ -28,12 +29,12 @@ contains
     !------------------------------------------------------------------------
     
     do p = bounds%begp,bounds%endp
-       c = patch%column(p)
-       if (col%itype(c) == istsoil) then 
-          if (patch%is_veg(p) .or. patch%is_bareground(p)) then
-             patch%wtcol(p) = patch%wt_ed(p)
+       c = veg_pp%column(p)
+       if (col_pp%itype(c) == istsoil .and. col_pp%active(c) ) then 
+          if ( veg_pp%is_veg(p) .or. veg_pp%is_bareground(p)) then
+             veg_pp%wtcol(p) = veg_pp%wt_ed(p)
           else
-             patch%wtcol(p)  = 0.0_r8 
+             veg_pp%wtcol(p) = 0.0_r8 
           end if
        end if
     end do

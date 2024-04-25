@@ -1,0 +1,29 @@
+&sbetr_driver
+  simulator_name = 'standalone'
+/
+
+&betr_parameters
+  reaction_method = 'mock_run'
+  advection_on = .false.
+  diffusion_on = .true.
+  reaction_on = .false.
+  ebullition_on=.false.
+/
+
+&betr_time
+  stop_n = 60
+  stop_option='ndays'
+/
+
+&forcing_inparm
+  forcing_filename = '../../../input_data/sierra_halfhour_full_year_clmforc.nc'
+/
+
+&betr_grid
+  grid_data_filename = '../../../input_data/clm_exp_grid.cdl.nc'
+/
+
+&regression_test
+  write_regression_output = .true.
+  cells = 5
+/

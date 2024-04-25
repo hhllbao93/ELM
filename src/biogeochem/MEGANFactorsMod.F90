@@ -6,11 +6,12 @@ module MEGANFactorsMod
   ! !USES:
   use shr_kind_mod, only : r8 => shr_kind_r8
   use abortutils,   only : endrun
-  use clm_varctl,   only : iulog
+  use elm_varctl,   only : iulog
   use shr_log_mod,  only : errMsg => shr_log_errMsg
   !
   implicit none
   private
+  save
   !
   ! !PUBLIC MEMBERS:
   public :: megan_factors_init
@@ -41,11 +42,8 @@ module MEGANFactorsMod
   integer , pointer :: hash_table_indices (:)            !  [integer (:)]  pointer to hash table indices 
   integer, parameter :: tbl_hash_sz = 2**16           ! hash table size
   !
-  character(len=40), allocatable :: comp_names(:)     ! MEGAN compound names
+  character(len=32), allocatable :: comp_names(:)     ! MEGAN compound names
   real(r8),          allocatable :: comp_molecwghts(:)! MEGAN compound molecular weights
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
   !-----------------------------------------------------------------------
 
 contains
@@ -73,7 +71,7 @@ contains
     if (ndx<1) then 
        errmes = 'megan_factors_get: '//trim(comp_name)//' compound not found in MEGAN table'
        write(iulog,*) trim(errmes)
-       call endrun(msg=errMsg(sourcefile, __LINE__))
+       call endrun(msg=errMsg(__FILE__, __LINE__))
     endif
 
     factors(:) = comp_factors_table( ndx )%eff(:)
@@ -92,7 +90,6 @@ contains
     use ncdio_pio, only : ncd_pio_openfile,ncd_inqdlen
     use pio, only : pio_inq_varid,pio_get_var,file_desc_t,pio_closefile
     use fileutils   , only : getfil
-    use clm_varpar  , only : mxpft
     !
     ! !ARGUMENTS:
     character(len=*),intent(in) :: filename ! MEGAN factors input file
@@ -124,9 +121,6 @@ contains
     call ncd_inqdlen( ncid, dimid, n_classes, name='Class_Num')
     call ncd_inqdlen( ncid, dimid, n_patchs, name='PFT_Num')
 
-    if ( n_patchs /= mxpft )then
-       call endrun(msg='PFT_Num does NOT equal mxpft: '//errMsg(sourcefile, __LINE__))
-    end if
     npfts = n_patchs
 
     ierr = pio_inq_varid(ncid,'Class_EF', class_ef_vid)
@@ -155,7 +149,7 @@ contains
     call  bld_hash_table_indices( comp_names )
     do i=1,n_comps
        start=(/i,1/)
-       count=(/1,mxpft/) 
+       count=(/1,16/) !TODO - this SHOULD NOT BE HARD-WIRED here!!!!!
        ierr = pio_get_var( ncid, comp_ef_vid,  start, count, comp_factors )
        start=(/class_nums(i),1/)
        ierr = pio_get_var( ncid, class_ef_vid, start, count, class_factors  )
@@ -274,7 +268,7 @@ contains
     integer :: i
 
     integer, parameter :: tbl_max_idx = 15  ! 2**N - 1
-    integer, parameter :: gen_hash_key_offset = int(z'000053db')
+    integer, parameter :: gen_hash_key_offset = z'000053db'
     integer, dimension(0:tbl_max_idx) :: tbl_gen_hash_key =  (/61,59,53,47,43,41,37,31,29,23,17,13,11,7,3,1/)
 
     hash = gen_hash_key_offset

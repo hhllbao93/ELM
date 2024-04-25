@@ -3,22 +3,28 @@ module glc2lndMod
   !-----------------------------------------------------------------------
   ! !DESCRIPTION:
   ! Handle arrays used for exchanging data from glc to clm.
+  ! For now glc datais send and received on the lnd decomposition and grid.
+  !
+  ! The fields sent from the lnd component to the glc component via
+  !  the coupler are labeled 's2x', or sno to coupler.
+  ! The fields received by the lnd component from the glc component
+  !  via the coupler are labeled 'x2s', or coupler to sno.
+  ! 'Sno' is a misnomer in that the exchanged data are related to
+  !  the ice beneath the snow, not the snow itself.  But by CESM convention,
+  ! 'ice' refers to sea ice, not land ice.
   !
   ! !USES:
-#include "shr_assert.h"
-  use decompMod      , only : bounds_type, subgrid_level_gridcell
+  use decompMod      , only : bounds_type
   use shr_log_mod    , only : errMsg => shr_log_errMsg
   use shr_kind_mod   , only : r8 => shr_kind_r8
-  use shr_infnan_mod , only : nan => shr_infnan_nan, assignment(=)
-  use clm_varpar     , only : maxpatch_glc
-  use clm_varctl     , only : iulog, glc_do_dynglacier
-  use clm_varcon     , only : spval, ispval
+  use elm_varpar     , only : maxpatch_glcmec
+  use elm_varctl     , only : iulog, glc_smb
+  use elm_varcon     , only : spval
   use abortutils     , only : endrun
-  use GridcellType   , only : grc
-  use LandunitType   , only : lun
-  use ColumnType     , only : col
-  use landunit_varcon, only : istice
-  use glcBehaviorMod , only : glc_behavior_type
+  use GridcellType   , only : grc_pp
+  use TopounitType   , only : top_pp
+  use LandunitType   , only : lun_pp
+  use ColumnType     , only : col_pp
   !
   ! !REVISION HISTORY:
   ! Created by William Lipscomb, Dec. 2007, based on clm_atmlnd.F90.
@@ -27,29 +33,19 @@ module glc2lndMod
   implicit none
   private
   save
+  public :: glc2lnd_vars_update_glc2lnd_acc
 
   ! glc -> land variables structure
   type, public :: glc2lnd_type
 
-     ! ------------------------------------------------------------------------
-     ! Public data
-     ! ------------------------------------------------------------------------
+     real(r8), pointer :: frac_grc    (:,:) => null()
+     real(r8), pointer :: topo_grc    (:,:) => null()
+     real(r8), pointer :: hflx_grc    (:,:) => null()
 
-     ! Where we should do runoff routing that is appropriate for having a dynamic icesheet underneath.
-     real(r8), pointer :: glc_dyn_runoff_routing_grc (:) => null()
-
-     ! ------------------------------------------------------------------------
-     ! Private data
-     ! ------------------------------------------------------------------------
-
-     type(glc_behavior_type), pointer, private :: glc_behavior  ! reference to the glc_behavior instance
-
-     real(r8), pointer, private :: frac_grc    (:,:) => null()
-     real(r8), pointer, private :: topo_grc    (:,:) => null()
-     real(r8), pointer, private :: hflx_grc    (:,:) => null()
-
-     ! Area in which values from GLC are valid, received from GLC (0-1)
-     real(r8), pointer, private :: icemask_grc (:)   => null()
+     ! Total ice sheet grid coverage mask (0-1)
+     ! (true ice sheet mask, received from glc, in contrast to glcmask, which is just a
+     ! guess available at initialization)
+     real(r8), pointer :: icemask_grc (:)   => null()
 
      ! icemask_coupled_fluxes_grc is like icemask_grc, but the mask only contains icesheet
      ! points that potentially send non-zero fluxes to the coupler. i.e., it does not
@@ -62,69 +58,41 @@ module glc2lndMod
      ! could theoretically have an icesheet whose areas are evolving, and CLM is updating
      ! its glacier areas to match, but where we're zeroing out the fluxes sent to the
      ! coupler, and so we're using the non-dynamic form of runoff routing in CLM.)
-     real(r8), pointer, private :: icemask_coupled_fluxes_grc (:)  => null()
+     real(r8), pointer :: icemask_coupled_fluxes_grc (:)  => null()
+
+     ! Where we should do runof routing that is appropriate for having a dynamic icesheet underneath.
+     logical , pointer :: glc_dyn_runoff_routing_grc (:) => null()
 
    contains
 
-     ! ------------------------------------------------------------------------
-     ! Public routines
-     ! ------------------------------------------------------------------------
-
      procedure, public  :: Init
-     procedure, public  :: Clean
+     procedure, public  :: Restart
+     procedure, public  :: update_glc2lnd
 
-     ! In each timestep, these routines should be called in order (though they don't need
-     ! to be called all at once):
-     ! - set_glc2lnd_fields
-     ! - update_glc2lnd_fracs
-     ! - update_glc2lnd_topo
-     procedure, public  :: set_glc2lnd_fields_mct   ! set coupling fields sent from glc to lnd
-     procedure, public  :: set_glc2lnd_fields_nuopc ! set coupling fields sent from glc to lnd
-     procedure, public  :: update_glc2lnd_fracs     ! update subgrid fractions based on input from GLC
-     procedure, public  :: update_glc2lnd_topo      ! update topographic heights
-
-     ! For unit testing only:
-     procedure, public  :: for_test_set_glc2lnd_fields_directly  ! set glc2lnd fields directly in a unit testing context
-
-     ! ------------------------------------------------------------------------
-     ! Private routines
-     ! ------------------------------------------------------------------------
-
-     procedure, private :: InitAllocate
+     procedure, public :: InitAllocate
      procedure, private :: InitHistory
      procedure, private :: InitCold
-
-     ! call various wrapup routines at the end of setting glc2lnd fields
-     procedure, private :: set_glc2lnd_fields_wrapup
-
-     ! sanity-check icemask from GLC
-     procedure, private :: check_glc2lnd_icemask
-
-     ! sanity-check icemask_coupled_fluxes from GLC
-     procedure, private :: check_glc2lnd_icemask_coupled_fluxes
-
-     ! update glc_dyn_runoff_routing field based on input from GLC
-     procedure, private :: update_glc2lnd_dyn_runoff_routing
+     procedure, private :: check_glc2lnd_icemask  ! sanity-check icemask from GLC
+     procedure, private :: check_glc2lnd_icemask_coupled_fluxes ! sanity-check icemask_coupled_fluxes from GLC
+     procedure, private :: update_glc2lnd_dyn_runoff_routing ! update glc_dyn_runoff_routing field based on input from GLC
+     procedure, private :: update_glc2lnd_fracs   ! update subgrid fractions based on input from GLC
+     procedure, private :: update_glc2lnd_topo    ! update column-level topographic heights based on input from GLC
 
   end type glc2lnd_type
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
 
   !------------------------------------------------------------------------
 
 contains
 
   !------------------------------------------------------------------------
-  subroutine Init(this, bounds, glc_behavior)
+  subroutine Init(this, bounds)
 
     class(glc2lnd_type) :: this
     type(bounds_type), intent(in) :: bounds
-    type(glc_behavior_type), intent(in), target :: glc_behavior
 
     call this%InitAllocate(bounds)
     call this%InitHistory(bounds)
-    call this%InitCold(bounds, glc_behavior)
+    call this%InitCold(bounds)
 
   end subroutine Init
 
@@ -144,12 +112,12 @@ contains
 
     begg = bounds%begg; endg = bounds%endg
 
-    allocate(this%frac_grc    (begg:endg,0:maxpatch_glc)) ;   this%frac_grc    (:,:) = nan
-    allocate(this%topo_grc    (begg:endg,0:maxpatch_glc)) ;   this%topo_grc    (:,:) = nan
-    allocate(this%hflx_grc    (begg:endg,0:maxpatch_glc)) ;   this%hflx_grc    (:,:) = nan
-    allocate(this%icemask_grc (begg:endg))                   ;   this%icemask_grc (:)   = nan
-    allocate(this%icemask_coupled_fluxes_grc (begg:endg))    ;   this%icemask_coupled_fluxes_grc (:)   = nan
-    allocate(this%glc_dyn_runoff_routing_grc (begg:endg))    ;   this%glc_dyn_runoff_routing_grc (:)   = nan
+    allocate(this%frac_grc    (begg:endg,0:maxpatch_glcmec)) ;   this%frac_grc    (:,:) = spval
+    allocate(this%topo_grc    (begg:endg,0:maxpatch_glcmec)) ;   this%topo_grc    (:,:) = spval
+    allocate(this%hflx_grc    (begg:endg,0:maxpatch_glcmec)) ;   this%hflx_grc    (:,:) = spval
+    allocate(this%icemask_grc (begg:endg))                   ;   this%icemask_grc (:)   = spval
+    allocate(this%icemask_coupled_fluxes_grc (begg:endg))    ;   this%icemask_coupled_fluxes_grc (:)   = spval
+    allocate(this%glc_dyn_runoff_routing_grc (begg:endg))    ;   this%glc_dyn_runoff_routing_grc (:)   = .false.
 
   end subroutine InitAllocate
 
@@ -158,6 +126,7 @@ contains
     !
     ! !USES:
     use histFileMod, only : hist_addfld1d
+    use elm_varcon , only : spval
     !
     ! !ARGUMENTS:
     class(glc2lnd_type) :: this
@@ -172,15 +141,17 @@ contains
     begg = bounds%begg
     endg = bounds%endg
 
-    this%icemask_grc(begg:endg) = spval
-    call hist_addfld1d (fname='ICE_MODEL_FRACTION',  units='unitless',  &
-         avgflag='A', long_name='Ice sheet model fractional coverage', &
-         ptr_gcell=this%icemask_grc, default='inactive')
+    if (maxpatch_glcmec > 0) then
+       this%icemask_grc(begg:endg) = spval
+       call hist_addfld1d (fname='ICE_MASK',  units='1',  &
+            avgflag='I', long_name='Ice sheet mask coverage', &
+            ptr_gcell=this%icemask_grc)
+    end if
 
   end subroutine InitHistory
 
   !-----------------------------------------------------------------------
-  subroutine InitCold(this, bounds, glc_behavior)
+  subroutine InitCold(this, bounds)
     !
     ! !USES:
     use domainMod      , only : ldomain
@@ -188,7 +159,6 @@ contains
     ! !ARGUMENTS:
     class(glc2lnd_type) :: this
     type(bounds_type), intent(in) :: bounds
-    type(glc_behavior_type), intent(in), target :: glc_behavior
     !
     ! !LOCAL VARIABLES:
     integer :: begg, endg
@@ -199,19 +169,17 @@ contains
     begg = bounds%begg
     endg = bounds%endg
 
-    this%glc_behavior => glc_behavior
-
     this%frac_grc(begg:endg, :) = 0.0_r8
     this%topo_grc(begg:endg, :) = 0.0_r8
     this%hflx_grc(begg:endg, :) = 0.0_r8
 
-    ! When running with a stub glc model, it's important that icemask_grc be initialized
-    ! to 0 everywhere. With an active glc model, icemask_grc will be updated in the first
-    ! time step, and it isn't needed before then, so it's safe to initialize it to 0.
-    ! Since icemask is 0, icemask_coupled_fluxes needs to be 0, too (and the latter is
-    ! safest in case we aren't coupled to CISM, to ensure that we use the uncoupled form
-    ! of runoff routing).
-    this%icemask_grc(begg:endg) = 0.0_r8
+    ! glcmask (from a file) provides a rough guess of the icemask (from CISM); thus, in
+    ! initialization, set icemask equal to glcmask; icemask will later get updated at
+    ! the start of the run loop, as soon as we have data from CISM
+    this%icemask_grc(begg:endg) = ldomain%glcmask(begg:endg)
+
+    ! initialize icemask_coupled_fluxes to 0; this seems safest in case we aren't coupled
+    ! to CISM (to ensure that we use the uncoupled form of runoff routing)
     this%icemask_coupled_fluxes_grc(begg:endg) = 0.0_r8
 
     call this%update_glc2lnd_dyn_runoff_routing(bounds)
@@ -220,201 +188,191 @@ contains
 
 
   !-----------------------------------------------------------------------
-  subroutine Clean(this)
+  subroutine Restart(this, bounds, ncid, flag)
     !
     ! !DESCRIPTION:
-    ! Deallocate memory in this object
+    ! Read/Write glc2lnd information to/from restart file.
+    !
+    ! !USES:
+    use ncdio_pio , only : ncd_double, file_desc_t
+    use decompMod , only : bounds_type
+    use restUtilMod
     !
     ! !ARGUMENTS:
-    class(glc2lnd_type), intent(inout) :: this
+    class(glc2lnd_type) , intent(inout) :: this
+    type(bounds_type)   , intent(in)    :: bounds
+    type(file_desc_t)   , intent(inout) :: ncid ! netcdf id
+    character(len=*)    , intent(in)    :: flag ! 'read' or 'write'
     !
     ! !LOCAL VARIABLES:
+    logical :: readvar      ! determine if variable is on initial file
 
-    character(len=*), parameter :: subname = 'Clean'
+    character(len=*), parameter :: subname = 'Restart'
     !-----------------------------------------------------------------------
 
-    deallocate(this%frac_grc)
-    deallocate(this%topo_grc)
-    deallocate(this%hflx_grc)
-    deallocate(this%icemask_grc)
-    deallocate(this%icemask_coupled_fluxes_grc)
-    deallocate(this%glc_dyn_runoff_routing_grc)
+    call restartvar(ncid=ncid, flag=flag, varname='icemask', xtype=ncd_double, &
+         dim1name='gridcell', &
+         long_name='total ice-sheet grid coverage mask', units='fraction', &
+         interpinic_flag='skip', readvar=readvar, data=this%icemask_grc)
 
-  end subroutine Clean
+ end subroutine Restart
+
 
   !-----------------------------------------------------------------------
-  subroutine set_glc2lnd_fields_mct(this, bounds, glc_present, x2l, &
-       index_x2l_Sg_ice_covered, index_x2l_Sg_topo, index_x2l_Flgg_hflx, &
-       index_x2l_Sg_icemask, index_x2l_Sg_icemask_coupled_fluxes)
+  subroutine update_glc2lnd(this, bounds)
     !
     ! !DESCRIPTION:
-    ! Set coupling fields sent from glc to lnd
+    ! Update values to derived-type CLM variables based on input from GLC (via the coupler)
     !
-    ! If glc_present is true, then the given fields are all assumed to be valid; if
-    ! glc_present is false, then these fields are ignored.
+    ! icemask, icemask_coupled_fluxes, glc_dyn_runoff_routing, and topo are always updated
+    ! (although note that this routine should only be called when
+    ! create_glacier_mec_landunit is true, or some similar condition; this should be
+    ! controlled in a conditional around the call to this routine); fracs are updated if
+    ! glc_do_dynglacier is true
+    !
+    ! !USES:
+    use elm_varctl , only : glc_do_dynglacier
     !
     ! !ARGUMENTS:
     class(glc2lnd_type), intent(inout) :: this
-    type(bounds_type)  , intent(in)    :: bounds
-    logical  , intent(in) :: glc_present                         ! true if running with a non-stub glc model
-    real(r8) , intent(in) :: x2l(:, bounds%begg: )               ! driver import state to land model [field, gridcell]
-    integer  , intent(in) :: index_x2l_Sg_ice_covered( 0: )      ! indices of ice-covered field in x2l, for each elevation class
-    integer  , intent(in) :: index_x2l_Sg_topo( 0: )             ! indices of topo field in x2l, for each elevation class
-    integer  , intent(in) :: index_x2l_Flgg_hflx( 0: )           ! indices of heat flux field in x2l, for each elevation class
-    integer  , intent(in) :: index_x2l_Sg_icemask                ! index of icemask field in x2l
-    integer  , intent(in) :: index_x2l_Sg_icemask_coupled_fluxes ! index of icemask_coupled_fluxes field in x2l
-    !
-    ! !LOCAL VARIABLES:
-    integer :: g
-    integer :: ice_class
-
-    character(len=*), parameter :: subname = 'set_glc2lnd_fields_mct'
-    !-----------------------------------------------------------------------
-
-    SHR_ASSERT_FL((ubound(x2l, 2) == bounds%endg), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(index_x2l_Sg_ice_covered) == (/maxpatch_glc/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(index_x2l_Sg_topo) == (/maxpatch_glc/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(index_x2l_Flgg_hflx) == (/maxpatch_glc/)), sourcefile, __LINE__)
-
-    if (glc_present) then
-       do g = bounds%begg, bounds%endg
-          do ice_class = 0, maxpatch_glc
-             this%frac_grc(g,ice_class)  = x2l(index_x2l_Sg_ice_covered(ice_class),g)
-             this%topo_grc(g,ice_class)  = x2l(index_x2l_Sg_topo(ice_class),g)
-             this%hflx_grc(g,ice_class)  = x2l(index_x2l_Flgg_hflx(ice_class),g)
-          end do
-          this%icemask_grc(g)  = x2l(index_x2l_Sg_icemask,g)
-          this%icemask_coupled_fluxes_grc(g)  = x2l(index_x2l_Sg_icemask_coupled_fluxes,g)
-       end do
-
-       call this%set_glc2lnd_fields_wrapup(bounds)
-    else
-       if (glc_do_dynglacier) then
-          call endrun(' ERROR: With glc_present false (e.g., a stub glc model), glc_do_dynglacier must be false '// &
-               errMsg(sourcefile, __LINE__))
-       end if
-    end if
-
-  end subroutine set_glc2lnd_fields_mct
-
-  !-----------------------------------------------------------------------
-  subroutine set_glc2lnd_fields_nuopc(this, bounds, glc_present, &
-       frac_grc, topo_grc, hflx_grc, icemask_grc, icemask_coupled_fluxes_grc)
-    !
-    ! !DESCRIPTION:
-    ! Set coupling fields sent from glc to lnd
-    !
-    ! If glc_present is true, then the given fields are all assumed to be valid; if
-    ! glc_present is false, then these fields are ignored.
-    !
-    ! !ARGUMENTS:
-    class(glc2lnd_type), intent(inout) :: this
-    type(bounds_type)  , intent(in)    :: bounds
-    logical  , intent(in) :: glc_present                              ! true if running with a non-stub glc model
-    real(r8) , intent(in) :: frac_grc(bounds%begg:,0:)                ! ice-covered field for each elevation class
-    real(r8) , intent(in) :: topo_grc(bounds%begg:,0:)                ! topo field for each elevation class
-    real(r8) , intent(in) :: hflx_grc(bounds%begg:,0:)                ! heat flux field for each elevation class
-    real(r8) , intent(in) :: icemask_grc(bounds%begg:)                ! icemask field
-    real(r8) , intent(in) :: icemask_coupled_fluxes_grc(bounds%begg:) ! icemask_coupled_fluxes field
-    !
-    ! !LOCAL VARIABLES:
-    integer :: g
-    integer :: ice_class
-
-    character(len=*), parameter :: subname = 'set_glc2lnd_fields_nuopc'
-    !-----------------------------------------------------------------------
-
-    SHR_ASSERT_FL((ubound(frac_grc, 1) == bounds%endg), sourcefile, __LINE__)
-    SHR_ASSERT_FL((ubound(topo_grc, 1) == bounds%endg), sourcefile, __LINE__)
-    SHR_ASSERT_FL((ubound(hflx_grc, 1) == bounds%endg), sourcefile, __LINE__)
-    SHR_ASSERT_FL((ubound(icemask_grc,1) == bounds%endg), sourcefile, __LINE__)
-    SHR_ASSERT_FL((ubound(icemask_coupled_fluxes_grc,1) == bounds%endg), sourcefile, __LINE__)
-
-    if (glc_present) then
-       do g = bounds%begg, bounds%endg
-          do ice_class = 0, maxpatch_glc
-             this%frac_grc(g,ice_class)  = frac_grc(g,ice_class)
-             this%topo_grc(g,ice_class)  = topo_grc(g,ice_class)
-             this%hflx_grc(g,ice_class)  = hflx_grc(g,ice_class)
-          end do
-          this%icemask_grc(g)  = icemask_grc(g)
-          this%icemask_coupled_fluxes_grc(g)  = icemask_coupled_fluxes_grc(g)
-       end do
-
-       call this%set_glc2lnd_fields_wrapup(bounds)
-    else
-       if (glc_do_dynglacier) then
-          call endrun(' ERROR: With glc_present false (e.g., a stub glc model), glc_do_dynglacier must be false '// &
-               errMsg(sourcefile, __LINE__))
-       end if
-    end if
-
-  end subroutine set_glc2lnd_fields_nuopc
-
-  !-----------------------------------------------------------------------
-  subroutine for_test_set_glc2lnd_fields_directly(this, bounds, &
-       topo, icemask)
-    !
-    ! !DESCRIPTION:
-    ! Set glc2lnd fields directly in a unit testing context
-    !
-    ! This currently only provides a mechanism to set fields that are actually needed in
-    ! our unit tests. More could be added later.
-    !
-    ! Also: In contrast to the production version (set_glc2lnd_fields), this does NOT
-    ! currently update glc2lnd_dyn_runoff_routing (because doing so would require having a
-    ! sensible glc_behavior, which we may not have; and also, we currently don't need this
-    ! field in a unit testing context). (Note: If we eventually want/need to update
-    ! glc2lnd_dyn_runoff_routing, and thus need a fully sensible glc_behavior, then we
-    ! should extract the self-calls at the end of set_glc2lnd_fields
-    ! (check_glc2lnd_icemask, check_glc2lnd_icemask_coupled_fluxes,
-    ! update_glc2lnd_dyn_runoff_routing) into a private routine like
-    ! set_glc2lnd_fields_wrapup, which could be called by both set_glc2lnd_fields and this
-    ! routine.)
-    !
-    ! !ARGUMENTS:
-    class(glc2lnd_type), intent(inout) :: this
-    type(bounds_type)  , intent(in)    :: bounds
-    real(r8), intent(in), optional :: topo( bounds%begg: , 0: )  ! topographic height [gridcell, elevclass]
-    real(r8), intent(in), optional :: icemask( bounds%begg: )
+    type(bounds_type)  , intent(in)    :: bounds ! bounds
     !
     ! !LOCAL VARIABLES:
 
-    character(len=*), parameter :: subname = 'for_test_set_glc2lnd_fields_directly'
+    character(len=*), parameter :: subname = 'update_glc2lnd'
     !-----------------------------------------------------------------------
 
-    if (present(topo)) then
-       SHR_ASSERT_ALL_FL((ubound(topo) == (/bounds%endg, maxpatch_glc/)), sourcefile, __LINE__)
-       this%topo_grc(bounds%begg:bounds%endg, 0:maxpatch_glc) = topo(bounds%begg:bounds%endg, 0:maxpatch_glc)
-    end if
-
-    if (present(icemask)) then
-       SHR_ASSERT_ALL_FL((ubound(icemask) == (/bounds%endg/)), sourcefile, __LINE__)
-       this%icemask_grc(bounds%begg:bounds%endg) = icemask(bounds%begg:bounds%endg)
-    end if
-
-  end subroutine for_test_set_glc2lnd_fields_directly
-
-  !-----------------------------------------------------------------------
-  subroutine set_glc2lnd_fields_wrapup(this, bounds)
-    !
-    ! !DESCRIPTION:
-    ! Call various wrapup routines at the end of setting glc2lnd fields
-    !
-    ! !ARGUMENTS:
-    class(glc2lnd_type), intent(inout) :: this
-    type(bounds_type)  , intent(in)    :: bounds
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'set_glc2lnd_fields_wrapup'
-    !-----------------------------------------------------------------------
-
+    ! Note that nothing is needed to update icemask or icemask_coupled_fluxes here,
+    ! because these values have already been set in lnd_import_export. However, we do
+    ! some sanity-checking of those fields here.
     call this%check_glc2lnd_icemask(bounds)
     call this%check_glc2lnd_icemask_coupled_fluxes(bounds)
+
     call this%update_glc2lnd_dyn_runoff_routing(bounds)
 
-  end subroutine set_glc2lnd_fields_wrapup
+    if (glc_do_dynglacier) then
+       call this%update_glc2lnd_fracs(bounds)
+    end if
+
+    call this%update_glc2lnd_topo(bounds)
+
+  end subroutine update_glc2lnd
+
+
+  !-----------------------------------------------------------------------
+  subroutine glc2lnd_vars_update_glc2lnd_acc(glc2lnd_vars, bounds)
+    !$acc routine seq
+    ! !DESCRIPTION:
+    ! Update values to derived-type CLM variables based on input from GLC (via the coupler)
+    !
+    ! icemask, icemask_coupled_fluxes, glc_dyn_runoff_routing, and topo are always updated
+    ! (although note that this routine should only be called when
+    ! create_glacier_mec_landunit is true, or some similar condition; this should be
+    ! controlled in a conditional around the call to this routine); fracs are updated if
+    ! glc_do_dynglacier is true
+    !
+    ! !USES:
+    use elm_varcon      , only : ispval
+    use elm_varctl      , only : glc_do_dynglacier
+    use landunit_varcon , only : istice_mec
+    use column_varcon   , only : col_itype_to_icemec_class
+    use subgridWeightsMod , only : set_landunit_weight
+    !
+    ! !ARGUMENTS:
+    type(glc2lnd_type), intent(inout) :: glc2lnd_vars
+    type(bounds_type)  , intent(in)    :: bounds ! bounds
+    !
+    ! !LOCAL VARIABLES:
+    integer :: g,t,c ,l                             ! indices
+    real(r8):: area_ice_mec                     ! area of the ice_mec landunit
+    integer :: l_ice_mec                        ! index of the ice_mec landunit
+    integer :: icemec_class                     ! current icemec class (1..maxpatch_glcmec)
+    logical :: frac_assigned(1:maxpatch_glcmec) ! whether this%frac has been assigned for each elevation class
+    logical :: error                            ! if an error was found
+    !-----------------------------------------------------------------------
+
+    ! Note that nothing is needed to update icemask or icemask_coupled_fluxes here,
+    ! because these values have already been set in lnd_import_export. However, we do
+    ! some sanity-checking of those fields here.
+    !!call this%check_glc2lnd_icemask(bounds)
+    !!call this%check_glc2lnd_icemask_coupled_fluxes(bounds)
+
+    !call this%update_glc2lnd_dyn_runoff_routing(bounds)
+    do g = bounds%begg, bounds%endg
+       if (glc2lnd_vars%icemask_coupled_fluxes_grc(g) > 0._r8) then
+          glc2lnd_vars%glc_dyn_runoff_routing_grc(g) = .true.
+       else
+          glc2lnd_vars%glc_dyn_runoff_routing_grc(g) = .false.
+       end if
+    end do
+
+    if (glc_do_dynglacier) then
+      do g = bounds%begg, bounds%endg
+         ! Values from GLC are only valid within the icemask, so we only update CLM's areas there
+         if (glc2lnd_vars%icemask_grc(g) > 0._r8) then
+            do t = grc_pp%topi(g), grc_pp%topf(g)
+               ! For now, all topounits on the gridcell will have identical settings for
+               ! the fractional area of the glacier landunit. This makes sense for max_topounits = 1,
+               ! but should not break for max_topounits > 1. Revisit this code during the update for glacier_mec.
+               ! Set total icemec landunit area
+               area_ice_mec = sum(glc2lnd_vars%frac_grc(g, 1:maxpatch_glcmec))
+               call set_landunit_weight(t, istice_mec, area_ice_mec)
+
+               ! If new landunit area is greater than 0, then update column areas
+               ! (If new landunit area is 0, col_pp%wtlunit is arbitrary, so we might as well keep the existing values)
+               if (area_ice_mec > 0) then
+                  ! Determine index of the glc_mec landunit
+                  l_ice_mec = top_pp%landunit_indices(istice_mec, t)
+                  
+                  if (l_ice_mec == ispval) then
+                     write(iulog,*) ' ERROR: no ice_mec landunit found within the icemask, for g = ', g
+                     call endrun()
+                  end if
+
+                  frac_assigned(1:maxpatch_glcmec) = .false.
+                  do c = lun_pp%coli(l_ice_mec), lun_pp%colf(l_ice_mec)
+                     icemec_class = col_itype_to_icemec_class(col_pp%itype(c))
+                     col_pp%wtlunit(c) = glc2lnd_vars%frac_grc(g, icemec_class) / lun_pp%wttopounit(l_ice_mec)
+                     frac_assigned(icemec_class) = .true.
+                  end do
+
+                  ! Confirm that all elevation classes that have non-zero area according to
+                  ! this%frac have been assigned to a column in CLM's data structures
+                  error = .false.
+                  do icemec_class = 1, maxpatch_glcmec
+                     if (glc2lnd_vars%frac_grc(g, icemec_class) > 0._r8 .and. &
+                          .not. frac_assigned(icemec_class)) then
+                        error = .true.
+                     end if
+                  end do
+                  if (error) then
+                     print *, ' ERROR: at least one glc_mec column has non-zero area from the coupler'
+                     stop
+                  end if  ! error
+               end if  ! area_ice_mec > 0
+            end do ! loop over topounits on this gridcell
+         end if  ! this%icemask_grc(g) > 0
+      end do  ! g
+    end if
+
+    do c = bounds%begc, bounds%endc
+       l = col_pp%landunit(c)
+       g = col_pp%gridcell(c)
+
+       ! Values from GLC are only valid within the icemask, so we only update CLM's topo values there
+       if (glc2lnd_vars%icemask_grc(g) > 0._r8) then
+          if (lun_pp%itype(l) == istice_mec) then
+             icemec_class = col_itype_to_icemec_class(col_pp%itype(c))
+          else
+             ! If not on a glaciated column, assign topography to the bare-land value determined by GLC.
+             icemec_class = 0
+          end if
+
+          col_pp%glc_topo(c) = glc2lnd_vars%topo_grc(g, icemec_class)
+       end if
+    end do
+
+  end subroutine glc2lnd_vars_update_glc2lnd_acc
 
   !-----------------------------------------------------------------------
   subroutine check_glc2lnd_icemask(this, bounds)
@@ -424,10 +382,11 @@ contains
     !
     ! !USES:
     use domainMod , only : ldomain
+    use elm_varcon, only : nameg
     !
     ! !ARGUMENTS:
     class(glc2lnd_type), intent(in) :: this
-    type(bounds_type)       , intent(in) :: bounds
+    type(bounds_type)  , intent(in) :: bounds ! bounds
     !
     ! !LOCAL VARIABLES:
     integer :: g  ! grid cell index
@@ -437,37 +396,16 @@ contains
 
     do g = bounds%begg, bounds%endg
 
-       if (this%icemask_grc(g) > 0._r8) then
+       ! Ensure that icemask is a subset of glcmask. This is needed because we allocated
+       ! memory based on glcmask, so it is a problem if the ice sheet tries to expand
+       ! beyond the area defined by glcmask.
 
-          ! Ensure that icemask is a subset of has_virtual_columns. This is needed because
-          ! we allocated memory based on has_virtual_columns, so it is a problem if the
-          ! ice sheet tries to expand beyond the area defined by has_virtual_columns.
-          if (.not. this%glc_behavior%has_virtual_columns_grc(g)) then
-             write(iulog,'(a)') subname//' ERROR: icemask must be a subset of has_virtual_columns.'
-             write(iulog,'(a)') 'Ensure that the glacier_region_behavior namelist item is set correctly.'
-             write(iulog,'(a)') '(It should specify "virtual" for the region corresponding to the GLC domain.)'
-             write(iulog,'(a)') 'If glacier_region_behavior is set correctly, then you can fix this problem'
-             write(iulog,'(a)') 'by modifying GLACIER_REGION on the surface dataset.'
-             write(iulog,'(a)') '(Expand the region that corresponds to the GLC domain'
-             write(iulog,'(a)') '- i.e., the region specified as "virtual" in glacier_region_behavior.)'
-             call endrun(subgrid_index=g, subgrid_level=subgrid_level_gridcell, msg=errMsg(sourcefile, __LINE__))
-          end if
-
-          ! Ensure that icemask is a subset of melt_replaced_by_ice. This is needed
-          ! because we only compute SMB in the region given by melt_replaced_by_ice
-          ! (according to the logic for building the do_smb filter), and we need SMB
-          ! everywhere inside the icemask.
-          if (.not. this%glc_behavior%melt_replaced_by_ice_grc(g)) then
-             write(iulog,'(a)') subname//' ERROR: icemask must be a subset of melt_replaced_by_ice.'
-             write(iulog,'(a)') 'Ensure that the glacier_region_melt_behavior namelist item is set correctly.'
-             write(iulog,'(a)') '(It should specify "replaced_by_ice" for the region corresponding to the GLC domain.)'
-             write(iulog,'(a)') 'If glacier_region_behavior is set correctly, then you can fix this problem'
-             write(iulog,'(a)') 'by modifying GLACIER_REGION on the surface dataset.'
-             write(iulog,'(a)') '(Expand the region that corresponds to the GLC domain'
-             write(iulog,'(a)') '- i.e., the region specified as "replaced_by_ice" in glacier_region_melt_behavior.)'
-             call endrun(subgrid_index=g, subgrid_level=subgrid_level_gridcell, msg=errMsg(sourcefile, __LINE__))
-          end if
-
+       if (this%icemask_grc(g) > 0._r8 .and. ldomain%glcmask(g) == 0._r8) then
+          write(iulog,*) subname//' ERROR: icemask must be a subset of glcmask.'
+          write(iulog,*) 'You can fix this problem by adding more grid cells'
+          write(iulog,*) 'to the mask defined by the fglcmask file.'
+          write(iulog,*) '(Change grid cells to 1 everywhere that CISM can operate.)'
+          call endrun(decomp_index=g, elmlevel=nameg, msg=errMsg(__FILE__, __LINE__))
        end if
     end do
 
@@ -480,6 +418,7 @@ contains
     ! Do a sanity check on the icemask_coupled_fluxes field received from CISM via coupler.
     !
     ! !USES:
+    use elm_varcon, only : nameg
     !
     ! !ARGUMENTS:
     class(glc2lnd_type), intent(in) :: this
@@ -497,11 +436,11 @@ contains
        ! currently is no code in CLM that depends on this relationship, it seems helpful
        ! to ensure that this intuitive relationship holds, so that code developed in the
        ! future can rely on it.
+
        if (this%icemask_coupled_fluxes_grc(g) > 0._r8 .and. this%icemask_grc(g) == 0._r8) then
           write(iulog,*) subname//' ERROR: icemask_coupled_fluxes must be a subset of icemask.'
-          call endrun(subgrid_index=g, subgrid_level=subgrid_level_gridcell, msg=errMsg(sourcefile, __LINE__))
+          call endrun(decomp_index=g, elmlevel=nameg, msg=errMsg(__FILE__, __LINE__))
        end if
-
     end do
 
   end subroutine check_glc2lnd_icemask_coupled_fluxes
@@ -513,7 +452,6 @@ contains
     ! Update glc_dyn_runoff_routing field based on updated icemask_coupled_fluxes field
     !
     ! !USES:
-    use domainMod , only : ldomain
     !
     ! !ARGUMENTS:
     class(glc2lnd_type), intent(inout) :: this
@@ -527,75 +465,17 @@ contains
 
     ! Wherever we have an icesheet that is computing and sending fluxes to the coupler -
     ! which particularly means it is computing a calving flux - we will use the
-    ! "glc_dyn_runoff_routing" scheme, with 0 < glc_dyn_runoff_routing <= 1.
-    ! In these places, all or part of the snowcap flux goes to CISM rather than the runoff model.
-    ! In other places - including places where CISM is not running at all, as well as places
-    ! where CISM is running in diagnostic-only mode and therefore is not sending a calving flux -
-    ! we have glc_dyn_runoff_routing = 0, and the snowcap flux goes to the runoff model.
-    ! This is needed to conserve water correctly in the absence of a calving flux.
+    ! "glc_dyn_runoff_routing" scheme. In other places - including places where CISM is
+    ! not running at all, as well as places where CISM is running in diagnostic-only mode
+    ! and therefore is not sending a calving flux - we use the alternative
+    ! glc_dyn_runoff_routing=false scheme. This is needed to conserve water correctly in
+    ! the absence of a calving flux.
 
     do g = bounds%begg, bounds%endg
-
-       ! Set glc_dyn_runoff_routing_grc(g) to a value in the range [0,1].
-       !
-       ! This value gives the grid cell fraction that is deemed to be coupled to the
-       ! dynamic ice sheet model. For this fraction of the grid cell, snowcap fluxes are
-       ! sent to the ice sheet model. The remainder of the grid cell sends snowcap fluxes
-       ! to the runoff model.
-       !
-       ! Note: The coupler (in prep_glc_mod.F90) assumes that the fraction coupled to the
-       !       dynamic ice sheet model is min(lfrac, Sg_icemask_l), where lfrac is the
-       !       "frac" component of fraction_lx, and Sg_icemask_l is obtained by mapping
-       !       Sg_icemask_g from the glc to the land grid. Here, ldomain%frac is
-       !       equivalent to lfrac, and this%icemask_grc is equivalent to Sg_icemask_l.
-       !       However, here we use icemask_coupled_fluxes_grc, so that we route all snow
-       !       capping to runoff in areas where the ice sheet is not generating calving
-       !       fluxes. In addition, here we need to divide by lfrac, because the coupler
-       !       multiplies by it later (and, for example, if lfrac = 0.1 and
-       !       icemask_coupled_fluxes = 1, we want all snow capping to go to the ice
-       !       sheet model, not to the runoff model).
-       !
-       ! Note: In regions where CLM overlaps the CISM domain, this%icemask_grc(g) typically
-       !       is nearly equal to ldomain%frac(g). So an alternative would be to simply set
-       !       glc_dyn_runoff_routing_grc(g) = icemask_grc(g).
-       !       The reason to cap glc_dyn_runoff_routing at lfrac is to avoid sending the
-       !       ice sheet model a greater mass of water (in the form of snowcap fluxes)
-       !       than is allowed to fall on a CLM grid cell that is part ocean.
-
-       ! TODO(wjs, 2017-05-08) Ideally, we wouldn't have this duplication in logic
-       ! between the coupler and CLM. The best solution would be to have the coupler
-       ! itself do the partitioning of the snow capping flux between the ice sheet model
-       ! and the runoff model. A next-best solution would be to have the coupler send a
-       ! field to CLM telling it what fraction of snow capping should go to the runoff
-       ! model in each grid cell.
-
-       if (ldomain%frac(g) == 0._r8) then
-          ! Avoid divide by 0; note that, in this case, the amount going to runoff isn't
-          ! important for system-wide conservation, so we could really choose anything we
-          ! want.
-          this%glc_dyn_runoff_routing_grc(g) = this%icemask_coupled_fluxes_grc(g)
+       if (this%icemask_coupled_fluxes_grc(g) > 0._r8) then
+          this%glc_dyn_runoff_routing_grc(g) = .true.
        else
-          this%glc_dyn_runoff_routing_grc(g) = &
-               min(ldomain%frac(g), this%icemask_coupled_fluxes_grc(g)) / &
-               ldomain%frac(g)
-       end if
-
-       if (this%glc_dyn_runoff_routing_grc(g) > 0.0_r8) then
-
-          ! Ensure that glc_dyn_runoff_routing is a subset of melt_replaced_by_ice. This
-          ! is needed because glacial melt is only sent to the runoff stream in the region
-          ! given by melt_replaced_by_ice (because the latter is used to create the do_smb
-          ! filter, and the do_smb filter controls where glacial melt is computed).
-          if (.not. this%glc_behavior%melt_replaced_by_ice_grc(g)) then
-             write(iulog,'(a)') subname//' ERROR: icemask_coupled_fluxes must be a subset of melt_replaced_by_ice.'
-             write(iulog,'(a)') 'Ensure that the glacier_region_melt_behavior namelist item is set correctly.'
-             write(iulog,'(a)') '(It should specify "replaced_by_ice" for the region corresponding to the GLC domain.)'
-             write(iulog,'(a)') 'If glacier_region_behavior is set correctly, then you can fix this problem'
-             write(iulog,'(a)') 'by modifying GLACIER_REGION on the surface dataset.'
-             write(iulog,'(a)') '(Expand the region that corresponds to the GLC domain'
-             write(iulog,'(a)') '- i.e., the region specified as "replaced_by_ice" in glacier_region_melt_behavior.)'
-             call endrun(subgrid_index=g, subgrid_level=subgrid_level_gridcell, msg=errMsg(sourcefile, __LINE__))
-          end if
+          this%glc_dyn_runoff_routing_grc(g) = .false.
        end if
     end do
 
@@ -609,12 +489,12 @@ contains
     ! !DESCRIPTION:
     ! Update subgrid fractions based on input from GLC (via the coupler)
     !
-    ! The weights updated here are some col%wtlunit and lun%wtgcell values
-    !
-    ! If glc_do_dynglacier is false, nothing is changed
+    ! The weights updated here are some col_pp%wtlunit and lun_pp%wtgcell values
     !
     ! !USES:
-    use column_varcon     , only : col_itype_to_ice_class
+    use elm_varcon        , only : ispval
+    use landunit_varcon   , only : istice_mec
+    use column_varcon     , only : col_itype_to_icemec_class
     use subgridWeightsMod , only : set_landunit_weight
     !
     ! !ARGUMENTS:
@@ -622,130 +502,121 @@ contains
     type(bounds_type)  , intent(in) :: bounds  ! bounds
     !
     ! !LOCAL VARIABLES:
-    integer :: g,c                              ! indices
-    real(r8):: area_ice                         ! area of the ice landunit
-    integer :: l_ice                            ! index of the ice landunit
-    integer :: ice_class                        ! current ice class (1..maxpatch_glc)
-    logical :: frac_assigned(1:maxpatch_glc) ! whether this%frac has been assigned for each elevation class
+    integer :: g,t,c                              ! indices
+    real(r8):: area_ice_mec                     ! area of the ice_mec landunit
+    integer :: l_ice_mec                        ! index of the ice_mec landunit
+    integer :: icemec_class                     ! current icemec class (1..maxpatch_glcmec)
+    logical :: frac_assigned(1:maxpatch_glcmec) ! whether this%frac has been assigned for each elevation class
     logical :: error                            ! if an error was found
 
     character(len=*), parameter :: subname = 'update_glc2lnd_fracs'
     !-----------------------------------------------------------------------
 
-    if (glc_do_dynglacier) then
-       do g = bounds%begg, bounds%endg
-          ! Values from GLC are only valid within the icemask, so we only update CLM's areas there
-          if (this%icemask_grc(g) > 0._r8) then
+    do g = bounds%begg, bounds%endg
+       ! Values from GLC are only valid within the icemask, so we only update CLM's areas there
+       if (this%icemask_grc(g) > 0._r8) then
+          do t = grc_pp%topi(g), grc_pp%topf(g)
 
-             ! Set total ice landunit area
-             area_ice = sum(this%frac_grc(g, 1:maxpatch_glc))
-             call set_landunit_weight(g, istice, area_ice)
+             ! For now, all topounits on the gridcell will have identical settings for
+             ! the fractional area of the glacier landunit. This makes sense for max_topounits = 1,
+             ! but should not break for max_topounits > 1. Revisit this code during the update for glacier_mec.
+             ! Set total icemec landunit area
+             area_ice_mec = sum(this%frac_grc(g, 1:maxpatch_glcmec))
+             call set_landunit_weight(t, istice_mec, area_ice_mec)
 
              ! If new landunit area is greater than 0, then update column areas
-             ! (If new landunit area is 0, col%wtlunit is arbitrary, so we might as well keep the existing values)
-             if (area_ice > 0) then
-                ! Determine index of the ice landunit
-                l_ice = grc%landunit_indices(istice, g)
-                if (l_ice == ispval) then
-                   write(iulog,*) subname//' ERROR: no ice landunit found within the icemask, for g = ', g
-                   call endrun(subgrid_index=g, subgrid_level=subgrid_level_gridcell, &
-                        msg="no ice landunit found within the icemask")
+             ! (If new landunit area is 0, col_pp%wtlunit is arbitrary, so we might as well keep the existing values)
+             if (area_ice_mec > 0) then
+                ! Determine index of the glc_mec landunit
+                l_ice_mec = top_pp%landunit_indices(istice_mec, t)
+                if (l_ice_mec == ispval) then
+                   write(iulog,*) subname//' ERROR: no ice_mec landunit found within the icemask, for g = ', g
+                   call endrun()
                 end if
 
-                frac_assigned(1:maxpatch_glc) = .false.
-                do c = lun%coli(l_ice), lun%colf(l_ice)
-                   ice_class = col_itype_to_ice_class(col%itype(c))
-                   col%wtlunit(c) = this%frac_grc(g, ice_class) / lun%wtgcell(l_ice)
-                   frac_assigned(ice_class) = .true.
+                frac_assigned(1:maxpatch_glcmec) = .false.
+                do c = lun_pp%coli(l_ice_mec), lun_pp%colf(l_ice_mec)
+                   icemec_class = col_itype_to_icemec_class(col_pp%itype(c))
+                   col_pp%wtlunit(c) = this%frac_grc(g, icemec_class) / lun_pp%wttopounit(l_ice_mec)
+                   frac_assigned(icemec_class) = .true.
                 end do
 
                 ! Confirm that all elevation classes that have non-zero area according to
                 ! this%frac have been assigned to a column in CLM's data structures
                 error = .false.
-                do ice_class = 1, maxpatch_glc
-                   if (this%frac_grc(g, ice_class) > 0._r8 .and. &
-                        .not. frac_assigned(ice_class)) then
+                do icemec_class = 1, maxpatch_glcmec
+                   if (this%frac_grc(g, icemec_class) > 0._r8 .and. &
+                        .not. frac_assigned(icemec_class)) then
                       error = .true.
                    end if
                 end do
                 if (error) then
-                   write(iulog,*) subname//' ERROR: at least one glc column has non-zero area from the coupler,'
+                   write(iulog,*) subname//' ERROR: at least one glc_mec column has non-zero area from the coupler,'
                    write(iulog,*) 'but there was no slot in memory for this column; g = ', g
-                   write(iulog,*) 'this%frac_grc(g, 1:maxpatch_glc) = ', &
-                        this%frac_grc(g, 1:maxpatch_glc)
-                   write(iulog,*) 'frac_assigned(1:maxpatch_glc) = ', &
-                        frac_assigned(1:maxpatch_glc)
-                   call endrun(subgrid_index=g, subgrid_level=subgrid_level_gridcell, &
-                        msg="at least one glc column has non-zero area from cpl but has no slot in memory")
+                   write(iulog,*) 'this%frac_grc(g, 1:maxpatch_glcmec) = ', &
+                        this%frac_grc(g, 1:maxpatch_glcmec)
+                   write(iulog,*) 'frac_assigned(1:maxpatch_glcmec) = ', &
+                        frac_assigned(1:maxpatch_glcmec)
+                   call endrun()
                 end if  ! error
-             end if  ! area_ice > 0
-          end if  ! this%icemask_grc(g) > 0
-       end do  ! g
-    end if  ! glc_do_dynglacier
+             end if  ! area_ice_mec > 0
+          end do ! loop over topounits on this gridcell
+       end if  ! this%icemask_grc(g) > 0
+    end do  ! g
 
   end subroutine update_glc2lnd_fracs
 
   !-----------------------------------------------------------------------
-  subroutine update_glc2lnd_topo(this, bounds, topo_col, needs_downscaling_col)
+  subroutine update_glc2lnd_topo(this, bounds)
     !
     ! !DESCRIPTION:
-    ! Update column-level topographic heights based on input from GLC (via the coupler).
-    !
-    ! Also updates the logical array, needs_downscaling_col: Sets this array to true
-    ! anywhere where topo_col is updated, because these points will need downscaling.
-    ! (Leaves other array elements in needs_downscaling_col untouched.)
-    !
-    ! If glc_do_dynglacier is false, then both topographic heights and
-    ! needs_downscaling_col are left unchanged.
+    ! Update column-level topographic heights based on input from GLC (via the coupler)
     !
     ! !USES:
-    use landunit_varcon , only : istice
-    use column_varcon   , only : col_itype_to_ice_class
+    use landunit_varcon , only : istice_mec
+    use column_varcon   , only : col_itype_to_icemec_class
     !
     ! !ARGUMENTS:
-    class(glc2lnd_type) , intent(in)    :: this
-    type(bounds_type)   , intent(in)    :: bounds                   ! bounds
-    real(r8)            , intent(inout) :: topo_col( bounds%begc: ) ! topographic height (m)
-    logical             , intent(inout) :: needs_downscaling_col( bounds%begc: )
+    class(glc2lnd_type), intent(in) :: this
+    type(bounds_type)  , intent(in) :: bounds ! bounds
     !
     ! !LOCAL VARIABLES:
     integer :: c, l, g      ! indices
-    integer :: ice_class    ! current ice class (1..maxpatch_glc)
+    integer :: icemec_class ! current icemec class (1..maxpatch_glcmec)
 
     character(len=*), parameter :: subname = 'update_glc2lnd_topo'
     !-----------------------------------------------------------------------
 
-    SHR_ASSERT_ALL_FL((ubound(topo_col) == (/bounds%endc/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(needs_downscaling_col) == (/bounds%endc/)), sourcefile, __LINE__)
+    ! It is tempting to use the do_smb_c filter here, since we only need glc_topo inside
+    ! this filter. But the problem with using the filter is that this routine is called
+    ! before the filters are updated to reflect the updated weights. As long as
+    ! glacier_mec, natural veg and any other landunit within the smb filter are always
+    ! active, regardless of their weights, this isn't a problem. But we don't want to
+    ! build in assumptions that those rules will be in place regarding active flags.
+    ! Other ways around this problem would be:
+    ! (1) Use the inactive_and_active filter  - but we're trying to avoid use of that
+    !     filter if possible, because it can be confusing
+    ! (2) Call this topo update routine later in the driver loop, after filters have been
+    !     updated  - but that leads to greater complexity in the driver loop.
+    ! So it seems simplest just to take the minor performance hit of setting glc_topo
+    ! over all columns, even those outside the do_smb_c filter.
 
-    if (glc_do_dynglacier) then
-       do c = bounds%begc, bounds%endc
-          l = col%landunit(c)
-          g = col%gridcell(c)
+    do c = bounds%begc, bounds%endc
+       l = col_pp%landunit(c)
+       g = col_pp%gridcell(c)
 
-          ! Values from GLC are only valid within the icemask, so we only update CLM's topo values there
-          if (this%icemask_grc(g) > 0._r8) then
-             if (lun%itype(l) == istice) then
-                ice_class = col_itype_to_ice_class(col%itype(c))
-             else
-                ! If not on a glaciated column, assign topography to the bare-land value determined by GLC.
-                ice_class = 0
-             end if
-
-             ! Note that we do downscaling over all column types. This is for consistency:
-             ! interpretation of results would be difficult if some non-glacier column types
-             ! were downscaled but others were not.
-             !
-             ! BUG(wjs, 2016-11-15, bugz 2377) Actually, do not downscale over urban points:
-             ! this currently isn't allowed because the urban code references some
-             ! non-downscaled, gridcell-level atmospheric forcings
-             if (.not. lun%urbpoi(l)) then
-                topo_col(c) = this%topo_grc(g, ice_class)
-                needs_downscaling_col(c) = .true.
-             end if
+       ! Values from GLC are only valid within the icemask, so we only update CLM's topo values there
+       if (this%icemask_grc(g) > 0._r8) then
+          if (lun_pp%itype(l) == istice_mec) then
+             icemec_class = col_itype_to_icemec_class(col_pp%itype(c))
+          else
+             ! If not on a glaciated column, assign topography to the bare-land value determined by GLC.
+             icemec_class = 0
           end if
-       end do
-    end if
+
+          col_pp%glc_topo(c) = this%topo_grc(g, icemec_class)
+       end if
+    end do
 
   end subroutine update_glc2lnd_topo
 

@@ -1,7 +1,7 @@
 module lnd_comp_esmf
 
   !----------------------------------------------------------------------------
-  ! This is the ESMF cap for CTSM
+  ! This is the ESMF cap for ELM
   ! NOTE : both mpi_init and pio_init1 are initialized in lilac_mod.F90
   !----------------------------------------------------------------------------
 
@@ -34,16 +34,16 @@ module lnd_comp_esmf
   use decompMod         , only : bounds_type, get_proc_bounds
   use domainMod         , only : ldomain
   use controlMod        , only : control_setNL
-  use clm_varorb        , only : eccen, obliqr, lambm0, mvelpp
-  use clm_varctl        , only : clm_varctl_set, iulog, finidat
-  use clm_varctl        , only : nsrStartup, nsrContinue
-  use clm_varctl        , only : inst_index, inst_suffix, inst_name
+  use elm_varorb        , only : eccen, obliqr, lambm0, mvelpp
+  use elm_varctl        , only : elm_varctl_set, iulog, finidat
+  use elm_varctl        , only : nsrStartup, nsrContinue
+  use elm_varctl        , only : inst_index, inst_suffix, inst_name
   use clm_time_manager  , only : set_timemgr_init, advance_timestep
   use clm_time_manager  , only : update_rad_dtime
   use clm_time_manager  , only : get_nstep, get_step_size
   use clm_time_manager  , only : get_curr_date, get_curr_calday
-  use clm_initializeMod , only : initialize1, initialize2
-  use clm_driver        , only : clm_drv
+  use elm_initializeMod , only : initialize1, initialize2
+  use elm_driver        , only : elm_drv
   use lnd_import_export , only : import_fields, export_fields
   use lnd_shr_methods   , only : chkerr, state_diagnose
   use lnd_comp_shr      , only : mesh, model_meshfile, model_clock
@@ -52,10 +52,10 @@ module lnd_comp_esmf
   implicit none
   private                         ! By default make data private except
 
-  public :: lnd_register          ! register clm initial, run, final methods
-  public :: lnd_init              ! clm initialization
-  public :: lnd_run               ! clm run phase
-  public :: lnd_final             ! clm finalization/cleanup
+  public :: lnd_register          ! register elm initial, run, final methods
+  public :: lnd_init              ! elm initialization
+  public :: lnd_run               ! elm run phase
+  public :: lnd_final             ! elm finalization/cleanup
 
   !--------------------------------------------------------------------------
   ! Private module data
@@ -74,7 +74,7 @@ contains
 
   subroutine lnd_register(comp, rc)
 
-    ! Register the clm initial, run, and final phase methods with ESMF.
+    ! Register the elm initial, run, and final phase methods with ESMF.
     use ESMF     , only : ESMF_GridCompSetEntryPoint
     use ESMF     , only : ESMF_METHOD_INITIALIZE, ESMF_METHOD_RUN, ESMF_METHOD_FINALIZE
 
@@ -127,7 +127,7 @@ contains
     logical                    :: exists                     ! true if file exists
     character(len=CL)          :: caseid                     ! case identifier name
     character(len=CL)          :: starttype                  ! start-type (startup, continue, branch, hybrid)
-    integer                    :: nsrest                     ! clm restart type
+    integer                    :: nsrest                     ! elm restart type
     integer                    :: lbnum                      ! input to memory diagnostic
     integer                    :: shrlogunit                 ! old values for log unit and log level
     type(bounds_type)          :: bounds                     ! bounds
@@ -346,16 +346,16 @@ contains
     ! Read namelist, grid and surface data
     !----------------------
     ! set default values for run control variables
-    call clm_varctl_set(caseid_in=caseid, nsrest_in=nsrest)
-    ! Initialize glc_elevclass module
+    call elm_varctl_set(caseid_in=caseid, nsrest_in=nsrest)
     call glc_elevclass_init(glc_nec)
     call ESMF_LogWrite(subname//"default values for run control variables are set...", ESMF_LOGMSG_INFO)
 
     !----------------------
     ! Call initialize1
     !----------------------
+!hh!    call initialize1( )
     call initialize1(dtime=dtime_lilac)
-    call ESMF_LogWrite(subname//"ctsm initialize1 done...", ESMF_LOGMSG_INFO)
+    call ESMF_LogWrite(subname//"elm initialize1 done...", ESMF_LOGMSG_INFO)
 
     !----------------------
     ! Initialize decomposition and domain (ldomain) types and generate land mesh
@@ -365,13 +365,16 @@ contains
     call lnd_set_decomp_and_domain_from_readmesh(driver='lilac', vm=vm, &
          meshfile_lnd=lnd_mesh_filename, meshfile_mask=lnd_mesh_filename, &
          mesh_ctsm=mesh, ni=ni, nj=nj, rc=rc)
+    call ESMF_LogWrite(subname//"elm lnd_set_decomp_and_domain_from_readmesh done...", ESMF_LOGMSG_INFO)
 
     !--------------------------------
     ! Finish initializing ctsm
     !--------------------------------
     call initialize2(ni,nj)
-    call ESMF_LogWrite(subname//"ctsm initialize2 done...", ESMF_LOGMSG_INFO)
+    call ESMF_LogWrite(subname//"elm initialize2 done...", ESMF_LOGMSG_INFO)
 
+!hh!    call initialize3()
+!hh!    call ESMF_LogWrite(subname//"elm initialize3 done...", ESMF_LOGMSG_INFO)
     !--------------------------------
     ! Create import state (only assume input from atm - not rof and glc)
     !--------------------------------
@@ -486,7 +489,7 @@ contains
     endif
 #endif
 
-    call ESMF_LogWrite(subname//' CTSM INITIALIZATION DONE SUCCESSFULLY!!!! ', ESMF_LOGMSG_INFO)
+    call ESMF_LogWrite(subname//' ELM INITIALIZATION DONE SUCCESSFULLY!!!! ', ESMF_LOGMSG_INFO)
 
     if (masterproc) then
        write(iulog,*) " finished (lnd_comp_esmf): lnd_comp_init "
@@ -523,7 +526,7 @@ contains
   subroutine lnd_run(gcomp, import_state, export_state, clock, rc)
 
     !------------------------
-    ! Run CTSM
+    ! Run ELM
     !------------------------
     use ESMF       , only : ESMF_Alarm, ESMF_AlarmIsRinging, ESMF_AlarmRingerOff
     use ESMF       , only : ESMF_FAILURE, ESMF_ClockGetNextTime
@@ -540,16 +543,16 @@ contains
     type(ESMF_Time)        :: currTime
     type(ESMF_Time)        :: nextTime
     character(ESMF_MAXSTR) :: cvalue
-    integer                :: ymd            ! CTSM current date (YYYYMMDD)
-    integer                :: yr             ! CTSM current year
-    integer                :: mon            ! CTSM current month
-    integer                :: day            ! CTSM current day
-    integer                :: tod            ! CTSM current time of day (sec)
-    integer                :: ymd_lilac       ! Sync date (YYYYMMDD)
-    integer                :: yr_lilac        ! Sync current year
-    integer                :: mon_lilac       ! Sync current month
-    integer                :: day_lilac       ! Sync current day
-    integer                :: tod_lilac       ! Sync current time of day (sec)
+    integer                :: ymd            ! ELM current date (YYYYMMDD)
+    integer                :: yr             ! ELM current year
+    integer                :: mon            ! ELM current month
+    integer                :: day            ! ELM current day
+    integer                :: tod            ! ELM current time of day (sec)
+    integer                :: ymd_lilac      ! Sync date (YYYYMMDD)
+    integer                :: yr_lilac       ! Sync current year
+    integer                :: mon_lilac      ! Sync current month
+    integer                :: day_lilac      ! Sync current day
+    integer                :: tod_lilac      ! Sync current time of day (sec)
     integer                :: dtime          ! time step increment (sec)
     integer                :: nstep          ! time step index
     logical                :: rstwr          ! .true. ==> write restart file before returning
@@ -557,7 +560,7 @@ contains
     logical                :: dosend         ! true => send data back to driver
     logical                :: doalb          ! .true. ==> do albedo calculation on this time step
     real(r8)               :: nextsw_cday    ! calday from clock of next radiation computation
-    real(r8)               :: caldayp1       ! ctsm calday plus dtime offset
+    real(r8)               :: caldayp1       ! elm calday plus dtime offset
     integer                :: lbnum          ! input to memory diagnostic
     integer                :: g,i            ! counters
     real(r8)               :: calday         ! calendar day for nstep
@@ -756,9 +759,9 @@ contains
        if (ChkErr(rc,__LINE__,u_FILE_u)) return
        write(rdate,'(i4.4,"-",i2.2,"-",i2.2,"-",i5.5)') yr_lilac, mon_lilac, day_lilac, tod_lilac
 
-       call t_startf ('ctsm_run')
-       call clm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate, rof_prognostic=.false.)
-       call t_stopf ('ctsm_run')
+       call t_startf ('elm_run')
+       call elm_drv(doalb, nextsw_cday, declinp1, declin, rstwr, nlend, rdate)
+       call t_stopf ('elm_run')
 
        !--------------------------------
        ! Pack export state
@@ -770,7 +773,7 @@ contains
        call t_stopf ('lc_lnd_export')
 
        !--------------------------------
-       ! Advance ctsm time step
+       ! Advance elm time step
        !--------------------------------
 
        call advance_timestep()
@@ -781,7 +784,7 @@ contains
     ! Check that internal clock is in sync with lilac driver clock
     !--------------------------------
 
-    ! Get ctsm current time info
+    ! Get elm current time info
     call get_curr_date( yr, mon, day, tod, offset=-2*dtime )
     ymd = yr*10000 + mon*100 + day
     tod = tod
@@ -802,9 +805,9 @@ contains
     ! CTSM is actually 1 coupling intervals ahead of the driver clock
 
     if ( (ymd /= ymd_lilac) .or. (tod /= tod_lilac) ) then
-       write(iulog,*)'ctsm  ymd=',ymd      ,' ctsm  tod= ',tod
+       write(iulog,*)'elm ymd=',ymd      ,' elm tod= ',tod
        write(iulog,*)'lilac ymd=',ymd_lilac,' lilac tod= ',tod_lilac
-       call ESMF_LogWrite(subname//" CTSM clock not in sync with lilac clock",ESMF_LOGMSG_ERROR)
+       call ESMF_LogWrite(subname//" ELM clock not in sync with lilac clock",ESMF_LOGMSG_ERROR)
        rc = ESMF_FAILURE
        return
     end if

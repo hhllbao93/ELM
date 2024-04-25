@@ -7,31 +7,38 @@ module VOCEmissionMod
   ! !USES:
   use shr_kind_mod       , only : r8 => shr_kind_r8
   use shr_log_mod        , only : errMsg => shr_log_errMsg
-  use clm_varctl         , only : iulog
-  use clm_varpar         , only : maxveg, nlevcan
-  use pftconMod          , only : ndllf_evr_tmp_tree,  ndllf_evr_brl_tree
-  use pftconMod          , only : ndllf_dcd_brl_tree,  nbrdlf_evr_trp_tree
-  use pftconMod          , only : nbrdlf_evr_tmp_tree, nbrdlf_dcd_brl_shrub
-  use pftconMod          , only : nbrdlf_dcd_trp_tree, nbrdlf_dcd_tmp_tree
-  use pftconMod          , only : nbrdlf_dcd_brl_tree, nbrdlf_evr_shrub
-  use pftconMod          , only : nc3_arctic_grass   , nc3crop
-  use pftconMod          , only : nc4_grass,           noveg
+  use elm_varctl         , only : iulog
+  use elm_varpar         , only : numpft, nlevcan
+  use pftvarcon          , only : ndllf_evr_tmp_tree,  ndllf_evr_brl_tree
+  use pftvarcon          , only : ndllf_dcd_brl_tree,  nbrdlf_evr_trp_tree
+  use pftvarcon          , only : nbrdlf_evr_tmp_tree, nbrdlf_dcd_brl_shrub
+  use pftvarcon          , only : nbrdlf_dcd_trp_tree, nbrdlf_dcd_tmp_tree
+  use pftvarcon          , only : nbrdlf_dcd_brl_tree, nbrdlf_evr_shrub
+  use pftvarcon          , only : nc3_arctic_grass   , nc3crop
+  use pftvarcon          , only : nc4_grass,           noveg
   use shr_megan_mod      , only : shr_megan_megcomps_n, shr_megan_megcomp_t, shr_megan_linkedlist
   use shr_megan_mod      , only : shr_megan_mechcomps_n, shr_megan_mechcomps, shr_megan_mapped_emisfctrs
   use MEGANFactorsMod    , only : Agro, Amat, Anew, Aold, betaT, ct1, ct2, LDF, Ceo
   use decompMod          , only : bounds_type
   use abortutils         , only : endrun
   use fileutils          , only : getfil
-  use clm_varcon         , only : grlnd
+  use elm_varcon         , only : grlnd
   use atm2lndType        , only : atm2lnd_type
   use CanopyStateType    , only : canopystate_type
-  use PhotosynthesisMod  , only : photosyns_type
+  use PhotosynthesisType , only : photosyns_type
   use SoilStateType      , only : soilstate_type
   use SolarAbsorbedType  , only : solarabs_type
   use TemperatureType    , only : temperature_type
-  use PatchType          , only : patch                
+  use TopounitDataType   , only : top_as, top_af
+  use ColumnDataType     , only : col_ws
+  use VegetationType     , only : veg_pp                
+  use VegetationDataType , only : veg_es  
+  use topounit_varcon    , only : max_topounits
+  use GridcellType        , only : grc_pp
   !
+  ! !PUBLIC TYPES:
   implicit none
+  save
   private 
   !
   ! !PUBLIC MEMBER FUNCTIONS:
@@ -58,7 +65,7 @@ module VOCEmissionMod
      real(r8) , pointer, private :: gammaC_out_patch  (:)   ! 
      real(r8) , pointer, private :: vocflx_tot_patch  (:)   ! total VOC flux into atmosphere [moles/m2/sec] 
      real(r8) , pointer, PUBLIC  :: vocflx_patch      (:,:) ! (num_mech_comps) MEGAN flux [moles/m2/sec] 
-     real(r8) , pointer, private :: efisop_grc        (:,:) ! gridcell isoprene emission factors
+     real(r8) , pointer, private :: efisop_grc        (:,:,:) ! gridcell isoprene emission factors
    contains
      procedure, public  :: Init
      procedure, private :: InitAllocate
@@ -74,9 +81,6 @@ module VOCEmissionMod
   type(megan_out_type), private, pointer :: meg_out(:) ! (n_megan_comps) points to output fluxes
   !
   logical, parameter :: debug = .false.
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
   !------------------------------------------------------------------------
 
 contains
@@ -84,15 +88,10 @@ contains
   !------------------------------------------------------------------------
   subroutine Init(this, bounds)
 
-    use clm_varctl     , only : use_fates, use_fates_sp
     class(vocemis_type) :: this
     type(bounds_type), intent(in)    :: bounds  
 
     if ( shr_megan_mechcomps_n > 0) then
-       if ( use_fates .and. (.not. use_fates_sp) ) then
-           call endrun( msg='ERROR: MEGAN currently does NOT work with FATES outside of FATES-SP mode (see github issue #115)'//&
-                     errMsg(sourcefile, __LINE__))
-       end if
        call this%InitAllocate(bounds) 
        call this%InitHistory(bounds)
        call this%InitCold(bounds)
@@ -107,7 +106,6 @@ contains
     use shr_infnan_mod  , only : nan => shr_infnan_nan, assignment(=)
     use shr_megan_mod   , only : shr_megan_factors_file
     use MEGANFactorsMod , only : megan_factors_init, megan_factors_get
-    use clm_varpar      , only : mxpft
     !
     ! !ARGUMENTS:
     class(vocemis_type) :: this
@@ -116,13 +114,12 @@ contains
     ! !LOCAL VARIABLES:
     integer            :: i, imeg
     integer            :: class_num
-    real(r8)           :: factors(mxpft+1)
+    real(r8)           :: factors(numpft)
     real(r8)           :: molec_wght
     integer            :: begg, endg
     integer            :: begp, endp
     type(shr_megan_megcomp_t), pointer :: meg_cmp
     !-----------------------------------------------------------------------
-
 
     begg = bounds%begg; endg = bounds%endg
     begp = bounds%begp; endp = bounds%endp
@@ -131,9 +128,9 @@ contains
     
     meg_cmp => shr_megan_linkedlist
     do while(associated(meg_cmp))
-       allocate(meg_cmp%emis_factors(maxveg))
+       allocate(meg_cmp%emis_factors(numpft))
        call megan_factors_get( trim(meg_cmp%name), factors, class_num, molec_wght )
-       meg_cmp%emis_factors(1:maxveg) = factors(1:maxveg)
+       meg_cmp%emis_factors = factors
        meg_cmp%class_number = class_num
        meg_cmp%molec_weight = molec_wght
        meg_cmp => meg_cmp%next_megcomp
@@ -159,8 +156,7 @@ contains
     allocate(this%gammaC_out_patch  (begp:endp)) ; this%gammaC_out_patch  (:)   = nan
 
     allocate(this%vocflx_tot_patch  (begp:endp));  this%vocflx_tot_patch  (:)   = nan
-    allocate(this%efisop_grc      (6,begg:endg));  this%efisop_grc        (:,:) = nan
-
+    allocate(this%efisop_grc      (6,begg:endg,1:max_topounits));  this%efisop_grc        (:,:,:) = nan
     allocate(meg_out(shr_megan_megcomps_n)) 
     do i=1,shr_megan_megcomps_n
        allocate(meg_out(i)%flux_out(begp:endp))
@@ -179,7 +175,7 @@ contains
     ! Initialize history output fields for MEGAN emissions diagnositics
     !
     ! !USES 
-    use clm_varcon  , only : spval
+    use elm_varcon  , only : spval
     use histFileMod , only : hist_addfld1d
     !
     ! !ARGUMENTS:
@@ -211,7 +207,7 @@ contains
        this%vocflx_tot_patch(begp:endp)= spval
        call hist_addfld1d (fname='VOCFLXT', units='moles/m2/sec',  &
             avgflag='A', long_name='total VOC flux into atmosphere', &
-            ptr_patch=this%vocflx_tot_patch, set_lake=0._r8, set_urb=0._r8, default='inactive')
+            ptr_patch=this%vocflx_tot_patch, set_lake=0._r8, set_urb=0._r8)
 
        this%gamma_out_patch(begp:endp)   = spval
        call hist_addfld1d (fname='GAMMA', units='non',  &
@@ -310,7 +306,7 @@ contains
     !
     ! !USES
     use ncdio_pio
-    use clm_varctl, only : fsurdat
+    use elm_varctl, only : fsurdat
     !
     ! !ARGUMENTS:
     class(vocemis_type) :: this
@@ -321,53 +317,52 @@ contains
     integer            :: begg, endg
     type(file_desc_t)  :: ncid       ! netcdf id
     character(len=256) :: locfn      ! local filename
-    real(r8) ,pointer  :: temp_ef(:) ! read in - temporary EFs 
+    real(r8) ,pointer  :: temp_ef(:,:) ! read in - temporary EFs 
     !-----------------------------------------------------------------------
 
     begg = bounds%begg; endg = bounds%endg
 
     ! Time constant
 
-    allocate(temp_ef(begg:endg))
+    allocate(temp_ef(begg:endg,1:max_topounits))
 
     call getfil (fsurdat, locfn, 0)
     call ncd_pio_openfile (ncid, locfn, 0)
-
     call ncd_io(ncid=ncid, varname='EF1_BTR', flag='read', data=temp_ef, dim1name=grlnd, readvar=readvar)
     if (.not. readvar) then
-       call endrun(msg='iniTimeConst: errror reading EF1_BTR'//errMsg(sourcefile, __LINE__))
+       call endrun(msg='iniTimeConst: errror reading EF1_BTR'//errMsg(__FILE__, __LINE__))
     end if
-    this%efisop_grc(1,begg:endg)=temp_ef(begg:endg)
+    this%efisop_grc(1,begg:endg,1:max_topounits)=temp_ef(begg:endg,1:max_topounits)
 
     call ncd_io(ncid=ncid, varname='EF1_FET', flag='read', data=temp_ef, dim1name=grlnd, readvar=readvar)
     if (.not. readvar) then
-       call endrun(msg='iniTimeConst: errror reading EF1_FET'//errMsg(sourcefile, __LINE__))
+       call endrun(msg='iniTimeConst: errror reading EF1_FET'//errMsg(__FILE__, __LINE__))
     end if
-    this%efisop_grc(2,begg:endg)=temp_ef(begg:endg)
+    this%efisop_grc(2,begg:endg,1:max_topounits)=temp_ef(begg:endg,1:max_topounits)
 
     call ncd_io(ncid=ncid, varname='EF1_FDT', flag='read', data=temp_ef, dim1name=grlnd, readvar=readvar)
     if (.not. readvar) then
-       call endrun(msg='iniTimeConst: errror reading EF1_FDT'//errMsg(sourcefile, __LINE__))
+       call endrun(msg='iniTimeConst: errror reading EF1_FDT'//errMsg(__FILE__, __LINE__))
     end if
-    this%efisop_grc(3,begg:endg)=temp_ef(begg:endg)
+    this%efisop_grc(3,begg:endg,1:max_topounits)=temp_ef(begg:endg,1:max_topounits)
 
     call ncd_io(ncid=ncid, varname='EF1_SHR', flag='read', data=temp_ef, dim1name=grlnd, readvar=readvar)
     if (.not. readvar) then
-       call endrun(msg='iniTimeConst: errror reading EF1_SHR'//errMsg(sourcefile, __LINE__))
+       call endrun(msg='iniTimeConst: errror reading EF1_SHR'//errMsg(__FILE__, __LINE__))
     end if
-    this%efisop_grc(4,begg:endg)=temp_ef(begg:endg)
+    this%efisop_grc(4,begg:endg,1:max_topounits)=temp_ef(begg:endg,1:max_topounits)
 
     call ncd_io(ncid=ncid, varname='EF1_GRS', flag='read', data=temp_ef, dim1name=grlnd, readvar=readvar)
     if (.not. readvar) then
-       call endrun(msg='iniTimeConst: errror reading EF1_GRS'//errMsg(sourcefile, __LINE__))
+       call endrun(msg='iniTimeConst: errror reading EF1_GRS'//errMsg(__FILE__, __LINE__))
     end if
-    this%efisop_grc(5,begg:endg)=temp_ef(begg:endg)
+    this%efisop_grc(5,begg:endg,1:max_topounits)=temp_ef(begg:endg,1:max_topounits)
 
     call ncd_io(ncid=ncid, varname='EF1_CRP', flag='read', data=temp_ef, dim1name=grlnd, readvar=readvar)
     if (.not. readvar) then
-       call endrun(msg='iniTimeConst: errror reading EF1_CRP'//errMsg(sourcefile, __LINE__))
+       call endrun(msg='iniTimeConst: errror reading EF1_CRP'//errMsg(__FILE__, __LINE__))
     end if
-    this%efisop_grc(6,begg:endg)=temp_ef(begg:endg)
+    this%efisop_grc(6,begg:endg,1:max_topounits)=temp_ef(begg:endg,1:max_topounits)
 
     deallocate(temp_ef)
 
@@ -377,8 +372,8 @@ contains
 
   !-----------------------------------------------------------------------
   subroutine VOCEmission (bounds, num_soilp, filter_soilp, &
-       atm2lnd_inst, canopystate_inst, photosyns_inst, temperature_inst, &
-       vocemis_inst)
+       atm2lnd_vars, canopystate_vars, photosyns_vars, temperature_vars, &
+       vocemis_vars)
     !
     ! ! NEW DESCRIPTION
     ! Volatile organic compound emission
@@ -392,7 +387,7 @@ contains
     ! VOC flux (E) [ug m-2 h-1] is calculated from baseline emission
     ! factors (epsilon) [ug m-2 h-1] which are specified for each of the 16
     ! CLM Patches (in input file) OR in the case of isoprene, from
-    ! mapped EFs for each PATCH which reflect species divergence of emissions,
+    ! mapped EFs for each PFT which reflect species divergence of emissions,
     ! particularly in North America. 
     ! The emission activity factor (gamma) [unitless] for includes 
     ! dependence on PPFT, temperature, LAI, leaf age and soil moisture.
@@ -415,13 +410,13 @@ contains
     !
     ! !ARGUMENTS:
     type(bounds_type)      , intent(in)    :: bounds                  
-    integer                , intent(in)    :: num_soilp               ! number of columns in soil patch filter
+    integer                , intent(in)    :: num_soilp               ! number of columns in soil pft filter
     integer                , intent(in)    :: filter_soilp(num_soilp) ! patch filter for soil
-    type(atm2lnd_type)     , intent(in)    :: atm2lnd_inst
-    type(canopystate_type) , intent(in)    :: canopystate_inst
-    type(photosyns_type)   , intent(in)    :: photosyns_inst
-    type(temperature_type) , intent(in)    :: temperature_inst
-    type(vocemis_type)     , intent(inout) :: vocemis_inst
+    type(atm2lnd_type)     , intent(in)    :: atm2lnd_vars
+    type(canopystate_type) , intent(in)    :: canopystate_vars
+    type(photosyns_type)   , intent(in)    :: photosyns_vars
+    type(temperature_type) , intent(in)    :: temperature_vars
+    type(vocemis_type)     , intent(inout) :: vocemis_vars
     !
     ! !REVISION HISTORY:
     ! 4/29/11: Colette L. Heald: expand MEGAN to 20 compound classes
@@ -429,7 +424,7 @@ contains
     !                           and read in MEGAN factors from file.
     !
     ! !LOCAL VARIABLES:
-    integer  :: fp,p,g,c                ! indices
+    integer  :: fp,p,g,t,c,ti,topi              ! indices
     real(r8) :: epsilon                 ! emission factor [ug m-2 h-1]
     real(r8) :: gamma                   ! activity factor (accounting for light, T, age, LAI conditions)
     real(r8) :: gamma_p                 ! activity factor for PPFD
@@ -449,14 +444,13 @@ contains
     character(len=16)                  :: mech_name
     type(shr_megan_megcomp_t), pointer :: meg_cmp
     real(r8)                           :: cp, alpha,  Eopt, topt  ! for history output
-    real(r8)                           :: co2_ppmv
 
     real(r8)                           :: vocflx_meg(shr_megan_megcomps_n)
 
     ! factor used convert MEGAN units [micro-grams/m2/hr] to CAM srf emis units [g/m2/sec]
     real(r8), parameter :: megemis_units_factor = 1._r8/3600._r8/1.e6_r8
 
-    ! real(r8) :: root_depth(0:maxveg)    ! Root depth [m]
+    ! real(r8) :: root_depth(0:numpft)    ! Root depth [m]
     character(len=32), parameter :: subname = "VOCEmission"
     !-----------------------------------------------------------------------
 
@@ -467,7 +461,7 @@ contains
     !    root_depth(nbrdlf_evr_trp_tree:nbrdlf_evr_tmp_tree)   = 3.0_r8  ! broadleaf evergreen tree
     !    root_depth(nbrdlf_dcd_trp_tree:nbrdlf_dcd_brl_tree)   = 2.0_r8  ! broadleaf deciduous tree
     !    root_depth(nbrdlf_evr_shrub:nbrdlf_dcd_brl_shrub)     = 2.5_r8  ! shrub
-    !    root_depth(nc3_arctic_grass:maxveg)                   = 1.5_r8  ! grass/crop
+    !    root_depth(nc3_arctic_grass:numpft)                   = 1.5_r8  ! grass/crop
     !
     if ( shr_megan_mechcomps_n < 1) return
 
@@ -476,56 +470,55 @@ contains
     end if
 
     associate(                                                    & 
-         !dz           => col%dz                                , & ! Input:  [real(r8) (:,:) ]  depth of layer (m)                              
-         !bsw          => soilstate_inst%bsw_col                , & ! Input:  [real(r8) (:,:) ]  Clapp and Hornberger "b" (nlevgrnd)             
-         !clayfrac     => soilstate_inst%clayfrac_col           , & ! Input:  [real(r8) (:)   ]  fraction of soil that is clay                     
-         !sandfrac     => soilstate_inst%sandfrac_col           , & ! Input:  [real(r8) (:)   ]  fraction of soil that is sand                     
-         !watsat       => soilstate_inst%watsat_col             , & ! Input:  [real(r8) (:,:) ]  volumetric soil water at saturation (porosity) (nlevgrnd)
-         !sucsat       => soilstate_inst%sucsat_col             , & ! Input:  [real(r8) (:,:) ]  minimum soil suction (mm) (nlevgrnd)            
-         !h2osoi_vol   => waterstate_inst%h2osoi_vol_col        , & ! Input:  [real(r8) (:,:) ]  volumetric soil water (m3/m3)                   
-         !h2osoi_ice   => waterstate_inst%h2osoi_ice_col        , & ! Input:  [real(r8) (:,:) ]  ice soil content (kg/m3)                        
+         !dz           => col_pp%dz                                , & ! Input:  [real(r8) (:,:) ]  depth of layer (m)                              
+         !bsw          => soilstate_vars%bsw_col                , & ! Input:  [real(r8) (:,:) ]  Clapp and Hornberger "b" (nlevgrnd)             
+         !clayfrac     => soilstate_vars%clayfrac_col           , & ! Input:  [real(r8) (:)   ]  fraction of soil that is clay                     
+         !sandfrac     => soilstate_vars%sandfrac_col           , & ! Input:  [real(r8) (:)   ]  fraction of soil that is sand                     
+         !watsat       => soilstate_vars%watsat_col             , & ! Input:  [real(r8) (:,:) ]  volumetric soil water at saturation (porosity) (nlevgrnd)
+         !sucsat       => soilstate_vars%sucsat_col             , & ! Input:  [real(r8) (:,:) ]  minimum soil suction (mm) (nlevgrnd)            
+         !h2osoi_vol   => col_ws%h2osoi_vol        , & ! Input:  [real(r8) (:,:) ]  volumetric soil water (m3/m3)                   
+         !h2osoi_ice   => col_ws%h2osoi_ice        , & ! Input:  [real(r8) (:,:) ]  ice soil content (kg/m3)                        
          
-         forc_solad    => atm2lnd_inst%forc_solad_grc           , & ! Input:  [real(r8) (:,:) ]  direct beam radiation (visible only)            
-         forc_solai    => atm2lnd_inst%forc_solai_grc           , & ! Input:  [real(r8) (:,:) ]  diffuse radiation     (visible only)            
-         forc_pbot     => atm2lnd_inst%forc_pbot_downscaled_col , & ! Input:  [real(r8) (:)   ]  downscaled atmospheric pressure (Pa)                          
-         forc_pco2     => atm2lnd_inst%forc_pco2_grc            , & ! Input:  [real(r8) (:)   ]  partial pressure co2 (Pa)                                             
-         forc_solad24  => atm2lnd_inst%fsd24_patch              , & ! Input:  [real(r8) (:)   ]  direct beam radiation last 24hrs  (visible only)  
-         forc_solad240 => atm2lnd_inst%fsd240_patch             , & ! Input:  [real(r8) (:)   ]  direct beam radiation last 240hrs (visible only)  
-         forc_solai24  => atm2lnd_inst%fsi24_patch              , & ! Input:  [real(r8) (:)   ]  diffuse radiation  last 24hrs     (visible only)  
-         forc_solai240 => atm2lnd_inst%fsi240_patch             , & ! Input:  [real(r8) (:)   ]  diffuse radiation  last 240hrs    (visible only)  
+         forc_solad    => top_af%solad                          , & ! Input:  [real(r8) (:,:) ]  direct beam radiation (W/m**2)            
+         forc_solai    => top_af%solai                          , & ! Input:  [real(r8) (:,:) ]  diffuse radiation     (W/m**2)            
+         forc_pbot     => top_as%pbot                           , & ! Input:  [real(r8) (:)   ]  downscaled atmospheric pressure (Pa)                          
+         forc_solad24  => top_af%fsd24h                         , & ! Input:  [real(r8) (:)   ]  direct beam radiation last 24hrs  (visible only)  
+         forc_solad240 => top_af%fsd240h                        , & ! Input:  [real(r8) (:)   ]  direct beam radiation last 240hrs (visible only)  
+         forc_solai24  => top_af%fsi24h                         , & ! Input:  [real(r8) (:)   ]  diffuse radiation  last 24hrs     (visible only)  
+         forc_solai240 => top_af%fsi240h                        , & ! Input:  [real(r8) (:)   ]  diffuse radiation  last 240hrs    (visible only)  
 
-         fsun          => canopystate_inst%fsun_patch           , & ! Input:  [real(r8) (:)   ]  sunlit fraction of canopy                         
-         fsun24        => canopystate_inst%fsun24_patch         , & ! Input:  [real(r8) (:)   ]  sunlit fraction of canopy last 24 hrs             
-         fsun240       => canopystate_inst%fsun240_patch        , & ! Input:  [real(r8) (:)   ]  sunlit fraction of canopy last 240 hrs            
-         elai          => canopystate_inst%elai_patch           , & ! Input:  [real(r8) (:)   ]  one-sided leaf area index with burying by snow
-         elai240       => canopystate_inst%elai240_patch        , & ! Input:  [real(r8) (:)   ]  one-sided leaf area index with burying by snow last 240 hrs
+         fsun          => canopystate_vars%fsun_patch           , & ! Input:  [real(r8) (:)   ]  sunlit fraction of canopy                         
+         fsun24        => canopystate_vars%fsun24_patch         , & ! Input:  [real(r8) (:)   ]  sunlit fraction of canopy last 24 hrs             
+         fsun240       => canopystate_vars%fsun240_patch        , & ! Input:  [real(r8) (:)   ]  sunlit fraction of canopy last 240 hrs            
+         elai          => canopystate_vars%elai_patch           , & ! Input:  [real(r8) (:)   ]  one-sided leaf area index with burying by snow
+         elai240       => canopystate_vars%elai240_patch        , & ! Input:  [real(r8) (:)   ]  one-sided leaf area index with burying by snow 240 hrs  
 
-         cisun_z       => photosyns_inst%cisun_z_patch          , & ! Input:  [real(r8) (:,:) ]  sunlit intracellular CO2 (Pa)
-         cisha_z       => photosyns_inst%cisha_z_patch          , & ! Input:  [real(r8) (:,:) ]  shaded intracellular CO2 (Pa)
+         cisun_z       => photosyns_vars%cisun_z_patch          , & ! Input:  [real(r8) (:,:) ]  sunlit intracellular CO2 (Pa)
+         cisha_z       => photosyns_vars%cisha_z_patch          , & ! Input:  [real(r8) (:,:) ]  shaded intracellular CO2 (Pa)
          
-         t_veg         => temperature_inst%t_veg_patch          , & ! Input:  [real(r8) (:)   ]  patch vegetation temperature (Kelvin)
-         t_veg24       => temperature_inst%t_veg24_patch        , & ! Input:  [real(r8) (:)   ]  avg patch vegetation temperature for last 24 hrs
-         t_veg240      => temperature_inst%t_veg240_patch       , & ! Input:  [real(r8) (:)   ]  avg patch vegetation temperature for last 240 hrs
+         t_veg         => veg_es%t_veg          , & ! Input:  [real(r8) (:)   ]  pft vegetation temperature (Kelvin)
+         t_veg24       => veg_es%t_veg24        , & ! Input:  [real(r8) (:)   ]  avg pft vegetation temperature for last 24 hrs
+         t_veg240      => veg_es%t_veg240       , & ! Input:  [real(r8) (:)   ]  avg pft vegetation temperature for last 240 hrs
          
-         Eopt_out      => vocemis_inst%Eopt_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
-         topt_out      => vocemis_inst%topt_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
-         alpha_out     => vocemis_inst%alpha_out_patch          , & ! Output: [real(r8) (:)   ]                                                    
-         cp_out        => vocemis_inst%cp_out_patch             , & ! Output: [real(r8) (:)   ]                                                    
-         paru_out      => vocemis_inst%paru_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
-         par24u_out    => vocemis_inst%par24u_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         par240u_out   => vocemis_inst%par240u_out_patch        , & ! Output: [real(r8) (:)   ]                                                    
-         para_out      => vocemis_inst%para_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
-         par24a_out    => vocemis_inst%par24a_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         par240a_out   => vocemis_inst%par240a_out_patch        , & ! Output: [real(r8) (:)   ]                                                    
-         gammaL_out    => vocemis_inst%gammaL_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         gammaT_out    => vocemis_inst%gammaT_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         gammaP_out    => vocemis_inst%gammaP_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         gammaA_out    => vocemis_inst%gammaA_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         gammaS_out    => vocemis_inst%gammaS_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         gammaC_out    => vocemis_inst%gammaC_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
-         gamma_out     => vocemis_inst%gamma_out_patch          , & ! Output: [real(r8) (:)   ]                                                    
-         vocflx        => vocemis_inst%vocflx_patch             , & ! Output: [real(r8) (:,:) ]  VOC flux [moles/m2/sec]
-         vocflx_tot    => vocemis_inst%vocflx_tot_patch           & ! Output: [real(r8) (:)   ]  VOC flux [moles/m2/sec]
+         Eopt_out      => vocemis_vars%Eopt_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
+         topt_out      => vocemis_vars%topt_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
+         alpha_out     => vocemis_vars%alpha_out_patch          , & ! Output: [real(r8) (:)   ]                                                    
+         cp_out        => vocemis_vars%cp_out_patch             , & ! Output: [real(r8) (:)   ]                                                    
+         paru_out      => vocemis_vars%paru_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
+         par24u_out    => vocemis_vars%par24u_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         par240u_out   => vocemis_vars%par240u_out_patch        , & ! Output: [real(r8) (:)   ]                                                    
+         para_out      => vocemis_vars%para_out_patch           , & ! Output: [real(r8) (:)   ]                                                    
+         par24a_out    => vocemis_vars%par24a_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         par240a_out   => vocemis_vars%par240a_out_patch        , & ! Output: [real(r8) (:)   ]                                                    
+         gammaL_out    => vocemis_vars%gammaL_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         gammaT_out    => vocemis_vars%gammaT_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         gammaP_out    => vocemis_vars%gammaP_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         gammaA_out    => vocemis_vars%gammaA_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         gammaS_out    => vocemis_vars%gammaS_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         gammaC_out    => vocemis_vars%gammaC_out_patch         , & ! Output: [real(r8) (:)   ]                                                    
+         gamma_out     => vocemis_vars%gamma_out_patch          , & ! Output: [real(r8) (:)   ]                                                    
+         vocflx        => vocemis_vars%vocflx_patch             , & ! Output: [real(r8) (:,:) ]  VOC flux [moles/m2/sec]
+         vocflx_tot    => vocemis_vars%vocflx_tot_patch           & ! Output: [real(r8) (:)   ]  VOC flux [moles/m2/sec]
          )
 
     ! initialize variables which get passed to the atmosphere
@@ -540,8 +533,11 @@ contains
     !_______________________________________________________________________________
     do fp = 1,num_soilp
        p = filter_soilp(fp)
-       g = patch%gridcell(p)
-       c = patch%column(p)
+       g = veg_pp%gridcell(p)
+       t = veg_pp%topounit(p)
+       topi = grc_pp%topi(g)
+       ti = t - topi + 1
+       c = veg_pp%column(p)
 
        ! initialize EF
        epsilon=0._r8
@@ -551,27 +547,27 @@ contains
        vocflx_meg(:) = 0._r8
 
        ! calculate VOC emissions for non-bare ground Patches
-       if (patch%itype(p) > 0) then 
+       if (veg_pp%itype(p) > 0) then 
           gamma=0._r8
 
           ! Calculate PAR: multiply w/m2 by 4.6 to get umol/m2/s for par (added 8/14/02)
           !------------------------
           ! SUN:
-          par_sun    = (forc_solad(g,1)  + fsun(p)    * forc_solai(g,1))  * 4.6_r8
-          par24_sun  = (forc_solad24(p)  + fsun24(p)  * forc_solai24(p))  * 4.6_r8
-          par240_sun = (forc_solad240(p) + fsun240(p) * forc_solai240(p)) * 4.6_r8
+          par_sun    = (forc_solad(t,1)  + fsun(p)    * forc_solai(t,1))  * 4.6_r8
+          par24_sun  = (forc_solad24(t)  + fsun24(p)  * forc_solai24(t))  * 4.6_r8
+          par240_sun = (forc_solad240(t) + fsun240(p) * forc_solai240(t)) * 4.6_r8
 
           ! SHADE:
-          par_sha    = ((1._r8 - fsun(p))    * forc_solai(g,1))  * 4.6_r8
-          par24_sha  = ((1._r8 - fsun24(p))  * forc_solai24(p))  * 4.6_r8
-          par240_sha = ((1._r8 - fsun240(p)) * forc_solai240(p)) * 4.6_r8
+          par_sha    = ((1._r8 - fsun(p))    * forc_solai(t,1))  * 4.6_r8
+          par24_sha  = ((1._r8 - fsun24(p))  * forc_solai24(t))  * 4.6_r8
+          par240_sha = ((1._r8 - fsun240(p)) * forc_solai240(t)) * 4.6_r8
 
           ! Activity factor for LAI (Guenther et al., 2006): all species
           gamma_l = get_gamma_L(fsun240(p), elai(p))
 
           ! Activity factor for soil moisture: all species (commented out for now)
           !          gamma_sm = get_gamma_SM(clayfrac(p), sandfrac(p), h2osoi_vol(c,:), h2osoi_ice(c,:), &
-          !               col%dz(c,:), soilstate_inst%bsw_col(c,:), watsat(c,:), sucsat(c,:), root_depth(patch%itype(p)))
+          !               col_pp%dz(c,:), soilstate_vars%bsw_col(c,:), watsat(c,:), sucsat(c,:), root_depth(veg_pp%itype(p)))
           gamma_sm = 1.0_r8
 
           ! Loop through VOCs for light, temperature and leaf age activity factor & apply
@@ -586,28 +582,27 @@ contains
              ! set emis factor
              ! if specified, set EF for isoprene with mapped values
              if ( trim(meg_cmp%name) == 'isoprene' .and. shr_megan_mapped_emisfctrs) then
-                epsilon = get_map_EF(patch%itype(p),g, vocemis_inst)
+                epsilon = get_map_EF(veg_pp%itype(p),g, ti, vocemis_vars)
              else
-                epsilon = meg_cmp%emis_factors(patch%itype(p))
+                epsilon = meg_cmp%emis_factors(veg_pp%itype(p))
              end if
 
              class_num = meg_cmp%class_number
 
              ! Activity factor for PPFD
              gamma_p = get_gamma_P(par_sun, par24_sun, par240_sun, par_sha, par24_sha, par240_sha, &
-                  fsun(p), fsun240(p), forc_solad240(p),forc_solai240(p), LDF(class_num), cp, alpha)
+                  fsun(p), fsun240(p), forc_solad240(t),forc_solai240(t), LDF(class_num), cp, alpha)
 
              ! Activity factor for T
              gamma_t = get_gamma_T(t_veg240(p), t_veg24(p),t_veg(p), ct1(class_num), ct2(class_num),&
                                    betaT(class_num),LDF(class_num), Ceo(class_num), Eopt, topt)
 
              ! Activity factor for Leaf Age
-             gamma_a = get_gamma_A(patch%itype(p), elai240(p),elai(p),class_num)
+             gamma_a = get_gamma_A(veg_pp%itype(p), elai240(p),elai(p),class_num)
 
              ! Activity factor for CO2 (only for isoprene)
              if (trim(meg_cmp%name) == 'isoprene') then 
-                co2_ppmv = 1.e6_r8*forc_pco2(g)/forc_pbot(c)
-                gamma_c = get_gamma_C(cisun_z(p,1),cisha_z(p,1),forc_pbot(c),fsun(p), co2_ppmv)
+                gamma_c = get_gamma_C(cisun_z(p,1),cisha_z(p,1),forc_pbot(t),fsun(p))
              else
                 gamma_c = 1._r8
              end if
@@ -617,7 +612,7 @@ contains
 
              if ( (gamma >=0.0_r8) .and. (gamma< 100._r8) ) then
 
-                vocflx_meg(imeg) =  meg_cmp%coeff * epsilon * gamma * megemis_units_factor / meg_cmp%molec_weight ! moles/m2/sec
+                vocflx_meg(imeg) = epsilon * gamma * megemis_units_factor / meg_cmp%molec_weight ! moles/m2/sec
 
                 ! assign to arrays for history file output (not weighted by landfrac)
                 meg_out(imeg)%flux_out(p) = meg_out(imeg)%flux_out(p) &
@@ -668,7 +663,7 @@ contains
              vocflx_tot(p) = vocflx_tot(p) + vocflx(p,imech) ! moles/m2/sec
           enddo
 
-       end if ! patch%itype(1:15 only)
+       end if ! veg_pp%itype(1:15 only)
 
     enddo ! fp 
 
@@ -677,42 +672,43 @@ contains
   end subroutine VOCEmission
 
   !-----------------------------------------------------------------------
-  function get_map_EF(ivt_in, g_in, vocemis_inst)
+  function get_map_EF(ivt_in, g_in, ti_in, vocemis_vars)
     !
     ! Get mapped EF for isoprene
     ! Use gridded values for 6 Patches specified by MEGAN following
-    ! Guenther et al. (2006).  Map the maxveg CLM Patches to these 6.
+    ! Guenther et al. (2006).  Map the numpft CLM Patches to these 6.
     ! Units: [ug m-2 h-1] 
     !
     ! !ARGUMENTS:
     integer, intent(in) :: ivt_in
     integer, intent(in) :: g_in
-    type(vocemis_type), intent(in) :: vocemis_inst
+    integer, intent(in) :: ti_in  ! Topounit index
+    type(vocemis_type), intent(in) :: vocemis_vars
     !
     ! !LOCAL VARIABLES:
     real(r8)            :: get_map_EF
     !-----------------------------------------------------------------------
 
-    ! vocemis_inst%efisop_patch ! Output: [real(r8) (:,:)]  emission factors for isoprene for each patch [ug m-2 h-1]
+    ! vocemis_vars%efisop_patch ! Output: [real(r8) (:,:)]  emission factors for isoprene for each pft [ug m-2 h-1]
 
     get_map_EF = 0._r8
     
     if (     ivt_in == ndllf_evr_tmp_tree  &
          .or.     ivt_in == ndllf_evr_brl_tree) then   !fineleaf evergreen
-       get_map_EF = vocemis_inst%efisop_grc(2,g_in)
+       get_map_EF = vocemis_vars%efisop_grc(2,g_in, ti_in)
     else if (ivt_in == ndllf_dcd_brl_tree) then        !fineleaf deciduous
-       get_map_EF = vocemis_inst%efisop_grc(3,g_in)
+       get_map_EF = vocemis_vars%efisop_grc(3,g_in, ti_in)
     else if (ivt_in >= nbrdlf_evr_trp_tree &
          .and.    ivt_in <= nbrdlf_dcd_brl_tree) then  !broadleaf trees
-       get_map_EF = vocemis_inst%efisop_grc(1,g_in)
+       get_map_EF = vocemis_vars%efisop_grc(1,g_in,ti_in)
     else if (ivt_in >= nbrdlf_evr_shrub &
          .and.    ivt_in <= nbrdlf_dcd_brl_shrub) then !shrubs
-       get_map_EF = vocemis_inst%efisop_grc(4,g_in)
+       get_map_EF = vocemis_vars%efisop_grc(4,g_in, ti_in)
     else if (ivt_in >= nc3_arctic_grass &
          .and.    ivt_in <= nc4_grass) then            !grass
-       get_map_EF = vocemis_inst%efisop_grc(5,g_in)
+       get_map_EF = vocemis_vars%efisop_grc(5,g_in, ti_in)
     else if (ivt_in >= nc3crop) then                   !crops
-       get_map_EF = vocemis_inst%efisop_grc(6,g_in)
+       get_map_EF = vocemis_vars%efisop_grc(6,g_in, ti_in)
     end if
 
   end function get_map_EF
@@ -730,7 +726,7 @@ contains
     ! fvitt -- forc_solad240, forc_solai240 can be zero when CLM finidat is specified
     !          which will cause par240 to be zero and produce NaNs via log(par240)
     ! dml   -- fsun240 can be equal to or greater than one before 10 day averages are
-    !           set on startup or if a new patch comes online during land cover change.
+    !           set on startup or if a new pft comes online during land cover change.
     !           Avoid this problem by only doing calculations with fsun240 when fsun240 is
     !           between 0 and 1
     !
@@ -765,7 +761,7 @@ contains
     if ( (fsun240_in > 0._r8) .and. (fsun240_in < 1._r8) .and.  (forc_solad240_in > 0._r8) &
          .and. (forc_solai240_in > 0._r8)) then
        ! With alpha and cp calculated based on eq 6 and 7:
-       ! Note indexing for accumulated variables is all at patch level
+       ! Note indexing for accumulated variables is all at pft level
        ! SUN:
        alpha = ca1 - ca2 * log(par240_sun_in)
        cp = ca3 * exp(ca2 * (par24_sun_in-par0_sun))*par240_sun_in**(0.6_r8)
@@ -796,8 +792,8 @@ contains
     ! Guenther et al., 2006 eq 3
     !
     ! !USES:
-    use clm_varcon   , only : denice
-    use clm_varpar   , only : nlevsoi
+    use elm_varcon   , only : denice
+    use elm_varpar   , only : nlevsoi
     !
     ! !ARGUMENTS:
     implicit none
@@ -829,8 +825,8 @@ contains
     ! convert to volumetric soil water using equation 7.118 of the CLM4 Technical Note
     !
     ! !USES:
-    use clm_varcon , only : denice
-    use clm_varpar , only : nlevsoi
+    use elm_varcon   , only : denice
+    use elm_varpar   , only : nlevsoi
     !
     ! !ARGUMENTS:
     implicit none
@@ -952,11 +948,11 @@ contains
   end function get_gamma_T
 
   !-----------------------------------------------------------------------
-  function get_gamma_A(ivt_in, elai240_in, elai_in, nclass_in)
+  function get_gamma_A(ivt_in, elai240_in,elai_in,nclass_in)
 
     ! Activity factor for leaf age (Guenther et al., 2006)
     !-----------------------------
-    ! If not CNDV elai is constant therefore gamma_a=1.0
+    ! If bgc not active, then elai is constant therefore gamma_a=1.0
     ! gamma_a set to unity for evergreens (Patches 1, 2, 4, 5)
     ! Note that we assume here that the time step is shorter than the number of 
     !days after budbreak required to induce isoprene emissions (ti=12 days) and 
@@ -975,9 +971,9 @@ contains
     real(r8) :: fnew, fgro, fmat, fold  ! fractions of leaves at different phenological stages
     !-----------------------------------------------------------------------
     if ( (ivt_in == ndllf_dcd_brl_tree) .or. (ivt_in >= nbrdlf_dcd_trp_tree) ) then  ! non-evergreen
-
+       
        if ( (elai240_in > 0.0_r8) .and. (elai240_in < 1.e30_r8) )then 
-          elai_prev = 2._r8*elai240_in-elai_in  ! have accumulated average lai over last 10 days
+          elai_prev = 2._r8*elai240_in-elai_in  ! have accumulated average lai over last timestep
           if (elai_prev == elai_in) then
              fnew = 0.0_r8
              fgro = 0.0_r8
@@ -1009,96 +1005,88 @@ contains
   end function get_gamma_A
 
   !-----------------------------------------------------------------------
-  function get_gamma_C(cisun_in,cisha_in,forc_pbot_in,fsun_in, co2_ppmv)
-    
+  function get_gamma_C(cisun_in,cisha_in,forc_pbot_in,fsun_in)
+    !
     ! Activity factor for instantaneous CO2 changes (Heald et al., 2009)
     !-------------------------
-    ! With distinction between sunlit and shaded leaves, weight scalings by
+    ! With distinction between sunlit and shaded leafs, weight scalings by
     ! fsun and fshade 
-    !
-    ! !CALLED FROM: VOCEmission
     !
     ! !REVISION HISTORY:
     ! Author: Colette L. Heald (11/30/11)
-    !         Louisa K. Emmons (16/03/2015) - implement Colette's intended code
-    !                                         and use atmosphere CO2 (not nml setting)
     !
     ! !USES:
-    !    use clm_varctl,    only : co2_ppmv      ! corresponds to CCSM_CO2_PPMV set in env_conf.xml
+    use elm_varctl,    only : co2_ppmv      ! corresponds to CCSM_CO2_PPMV set in env_conf.xml
     !
     ! !ARGUMENTS:
     implicit none
-    ! !LOCAL VARIABLES:
-
-    ! varibles in
     real(r8),intent(in) :: cisun_in
     real(r8),intent(in) :: cisha_in
     real(r8),intent(in) :: forc_pbot_in
     real(r8),intent(in) :: fsun_in
-    real(r8),intent(in) :: co2_ppmv
-
+    !
+    ! !LOCAL VARIABLES:
     real(r8)            :: get_gamma_C
-
-    ! local variables
-    real(r8)            :: Ismax            ! empirical coeff for CO2 
-    real(r8)            :: h                ! empirical coeff for CO2 
-    real(r8)            :: Cstar            ! empirical coeff for CO2 
+    real(r8)            :: IEmin            ! empirical coeff for CO2 
+    real(r8)            :: IEmax            ! empirical coeff for CO2 
+    real(r8)            :: ECi50            ! empirical coeff for CO2 
+    real(r8)            :: Cislope          ! empirical coeff for CO2 
     real(r8)            :: fint             ! interpolation fraction for CO2
     real(r8)            :: ci               ! temporary sunlight/shade weighted cisun & cisha (umolCO2/mol)
-    real(r8)            :: gamma_ci         ! short-term exposure gamma
-    real(r8)            :: gamma_ca         ! long-term exposure gamma
-    real(r8), parameter :: Ismax_ca   = 1.344_r8  ! Estimated asymptote at which further decreases in intercellular CO2 have a negligible effect on isoprene emission
-    real(r8), parameter :: h_ca       = 1.4614_r8 ! Exponential scalar
-    real(r8), parameter :: Cstar_ca   = 585._r8   ! Scaling coefficient
-    real(r8), parameter :: CiCa_ratio = 0.7_r8    ! Ratio of intercellular CO2 to atmospheric CO2
     !-----------------------------------------------------------------------
 
-
-    ! LONG-TERM EXPOSURE (based on ambient CO2, Ca)
-    !-----------------------------------------------------------------------------
-    gamma_ca = Ismax_ca - ((Ismax_ca * (CiCa_ratio*co2_ppmv)**h_ca) / (Cstar_ca**h_ca + (CiCa_ratio*co2_ppmv)**h_ca) )
-
-
-    ! SHORT-TERM EXPOSURE (based on intercellular CO2, Ci)
-    !-----------------------------------------------------------------------------
     ! Determine long-term CO2 growth environment (ie. ambient CO2) and interpolate
     ! parameters
     if ( co2_ppmv < 400._r8 ) then
-       Ismax   = 1.072_r8
-       h       = 1.70_r8
-       Cstar   = 1218._r8
-    else if ( (co2_ppmv > 400._r8) .and. (co2_ppmv < 600._r8) ) then
-       fint    = (co2_ppmv - 400._r8)/200._r8
-       Ismax   = fint*1.036_r8 + (1.- fint)*1.072_r8
-       h       = fint*2.0125_r8 + (1.- fint)*1.70_r8
-       Cstar   = fint*1150._r8 + (1.- fint)*1218._r8
-    else if ( (co2_ppmv > 600._r8) .and. (co2_ppmv < 800._r8) ) then
-       fint    = (co2_ppmv - 600._r8)/200._r8
-       Ismax   = fint*1.046_r8 + (1.- fint)*1.036_r8
-       h       = fint*1.5380_r8 + (1.- fint)*2.0125_r8
-       Cstar   = fint*2025._r8 + (1.- fint)*1150._r8
+       IEmin   = 0.7301_r8
+       IEmax   = 1.0542_r8
+       ECi50   = 457._r8
+       Cislope = 3.1665_r8
+    else if ( (co2_ppmv > 400._r8) .and. (co2_ppmv < 500._r8) ) then
+       fint    = (co2_ppmv - 400._r8)/100._r8
+       IEmin   = fint*0.7301_r8 + (1._r8 - fint)*0.7034_r8
+       IEmax   = fint*1.0542_r8 + (1._r8 - fint)*0.9897_r8
+       ECi50   = fint*457._r8 + (1._r8 - fint)*472._r8
+       Cislope = fint*3.1665_r8 + (1._r8 - fint)*3.0652_r8
+    else if ( (co2_ppmv > 500._r8) .and. (co2_ppmv < 600._r8) ) then
+       fint = (co2_ppmv - 500._r8)/100._r8
+       IEmin   = fint*0.7034_r8 + (1._r8 - fint)*0.6768_r8
+       IEmax   = fint*0.9897_r8 + (1._r8 - fint)*0.9253_r8
+       ECi50   = fint*472._r8 + (1._r8 - fint)*488._r8
+       Cislope = fint*3.0652_r8 + (1._r8 - fint)*2.9321_r8
+    else if ( (co2_ppmv > 600._r8) .and. (co2_ppmv < 700._r8) ) then
+       fint = (co2_ppmv - 600._r8)/100._r8
+       IEmin   = fint*0.6768_r8 + (1._r8 - fint)*0.6500_r8
+       IEmax   = fint*0.9253_r8 + (1._r8 - fint)*0.8611_r8
+       ECi50   = fint*488._r8 + (1._r8 - fint)*508._r8
+       Cislope = fint*2.9321_r8 + (1._r8 - fint)*2.7497_r8
+    else if ( (co2_ppmv > 700._r8) .and. (co2_ppmv < 800._r8) ) then
+       fint = (co2_ppmv - 700._r8)/100._r8
+       IEmin   = fint*0.6500_r8 + (1._r8 - fint)*0.6063_r8
+       IEmax   = fint*0.8611_r8 + (1._r8 - fint)*0.7976_r8
+       ECi50   = fint*508._r8 + (1._r8 - fint)*575._r8
+       Cislope = fint*2.7497_r8 + (1._r8 - fint)*2.3643_r8
     else if ( co2_ppmv > 800._r8 ) then
-       Ismax   = 1.014_r8
-       h       = 2.861_r8
-       Cstar   = 1525._r8
+       IEmin   = 0.6063_r8
+       IEmax   = 0.7976_r8
+       ECi50   = 575._r8
+       Cislope = 2.3643_r8
     end if
 
-    ! Intercellular CO2 concentrations (ci) given in Pa, divide by atmos
+    ! Intracellular CO2 concentrations (ci) given in Pa, divide by atmos
     ! pressure to get mixing ratio (umolCO2/mol)
-    if ( (cisun_in .eq. cisun_in) .and. (cisha_in .eq. cisha_in) .and. (forc_pbot_in > 0._r8) .and. (fsun_in > 0._r8) ) then
+    if ( (cisun_in > 0._r8) .and. (cisha_in > 0._r8) .and. (forc_pbot_in > 0._r8) .and. (fsun_in > 0._r8) ) then
        ci = ( fsun_in*cisun_in + (1._r8-fsun_in)*cisha_in )/forc_pbot_in * 1.e6_r8
-       gamma_ci = Ismax - ( (Ismax*ci**h)/(Cstar**h+ci**h) ) 
-    else if ( (cisun_in > 0.0_r8) .and. (cisun_in < 1.e30_r8) .and. (forc_pbot_in > 0._r8) .and. (fsun_in .eq. 1._r8) ) then
-       ci = cisun_in/forc_pbot_in * 1.e6_r8
-       gamma_ci = Ismax - ( (Ismax*ci**h)/(Cstar**h+ci**h) ) 
-    else if ( (cisha_in > 0.0_r8) .and. (cisha_in < 1.e30_r8)  .and. (forc_pbot_in > 0._r8) .and. (fsun_in .eq. 0._r8) ) then
+       get_gamma_C = IEmin + ( (IEmax-IEmin)/(1._r8+(ci/ECi50)**Cislope) )
+    else if ( (cisha_in > 0._r8) .and. (forc_pbot_in > 0._r8) ) then
        ci = cisha_in/forc_pbot_in * 1.e6_r8
-       gamma_ci = Ismax - ( (Ismax*ci**h)/(Cstar**h+ci**h) ) 
+       get_gamma_C = IEmin + ( (IEmax-IEmin)/(1._r8+(ci/ECi50)**Cislope) )
+    else if ( (cisun_in > 0._r8) .and. (forc_pbot_in > 0._r8) ) then
+       ci = cisun_in/forc_pbot_in * 1.e6_r8
+       get_gamma_C = IEmin + ( (IEmax-IEmin)/(1._r8+(ci/ECi50)**Cislope) )
     else
-       gamma_ci = 1._r8
+       get_gamma_C = 1._r8
     end if
-
-    get_gamma_C = gamma_ci * gamma_ca
 
   end function get_gamma_C
 

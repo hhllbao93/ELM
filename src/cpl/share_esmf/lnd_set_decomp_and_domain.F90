@@ -8,7 +8,7 @@ module lnd_set_decomp_and_domain
   use shr_sys_mod  , only : shr_sys_abort
   use shr_log_mod  , only : errMsg => shr_log_errMsg
   use spmdMod      , only : masterproc, mpicom
-  use clm_varctl   , only : iulog, inst_suffix
+  use elm_varctl   , only : iulog, inst_suffix
   use abortutils   , only : endrun
 
   implicit none
@@ -42,9 +42,8 @@ contains
 
     use decompInitMod , only : decompInit_lnd
     use domainMod     , only : ldomain, domain_init
-    use decompMod     , only : gindex_global, bounds_type, get_proc_bounds
-    use clm_varpar    , only : nlevsoi
-    use clm_varctl    , only : use_soil_moisture_streams
+    use decompMod     , only : gsMap_lnd_gdc2glo, bounds_type, get_proc_bounds
+    use elm_varpar    , only : nlevsoi
     use ESMF          , only : ESMF_DistGridCreate
 
     ! input/output variables
@@ -140,7 +139,7 @@ contains
     allocate(gindex_lnd(nlnd))
     do g = begg, endg
        n = 1 + (g - begg)
-       gindex_lnd(n) = gindex_global(g-begg+1)
+       gindex_lnd(n) = gsMap_lnd_gdc2glo(g-begg+1)
     end do
 
     ! Initialize domain data structure
@@ -189,7 +188,7 @@ contains
   subroutine lnd_set_mesh_for_single_column(scol_lon, scol_lat, mesh, rc)
 
     ! Generate a mesh for single column
-    use clm_varcon, only : spval
+    use elm_varcon, only : spval
     use ESMF      , only : ESMF_Grid, ESMF_GridCreateNoPeriDimUfrm, ESMF_STAGGERLOC_CENTER, ESMF_STAGGERLOC_CORNER
 
     ! input/output variables
@@ -233,9 +232,8 @@ contains
     use decompInitMod , only : decompInit_lnd
     use decompMod     , only : bounds_type, get_proc_bounds
     use domainMod     , only : ldomain, domain_init
-    use clm_varctl    , only : use_soil_moisture_streams
-    use clm_varpar    , only : nlevsoi
-    use clm_varcon    , only : spval
+    use elm_varpar    , only : nlevsoi
+    use elm_varcon    , only : spval
 
     ! input/output variables
     real(r8) , intent(in) :: scol_lon
@@ -276,7 +274,7 @@ contains
     ! the fatmlndfrc file (where the isgrid2d variable was determined from before), the
     ! surface dataset is now used to determine if the underlying grid is 2d or not.
 
-    use clm_varctl  , only : fsurdat, single_column
+    use elm_varctl  , only : fsurdat, single_column
     use fileutils   , only : getfil
     use ncdio_pio   , only : ncd_io, file_desc_t, ncd_pio_openfile, ncd_pio_closefile, ncd_inqdlen, ncd_inqdid
 
@@ -581,7 +579,7 @@ contains
     ! Read the surface dataset grid related information
     ! This is used to set the domain decomposition - so global data is read here
 
-    use clm_varctl , only : fatmlndfrc
+    use elm_varctl , only : fatmlndfrc
     use fileutils  , only : getfil
     use ncdio_pio  , only : ncd_io, ncd_pio_openfile, ncd_pio_closefile, ncd_inqfdims, file_desc_t
 
@@ -667,9 +665,9 @@ contains
   subroutine lnd_set_ldomain_gridinfo_from_mesh(mesh, vm, gindex, begg, endg, isgrid2d, ni, nj, ldomain, rc)
 
     use domainMod  , only : domain_type, lon1d, lat1d
-    use clm_varcon , only : re
+    use elm_varcon , only : re
 
-    use clm_varcon , only : grlnd
+    use elm_varcon , only : grlnd
     use fileutils  , only : getfil
     use ncdio_pio  , only : ncd_io, file_desc_t, ncd_pio_openfile, ncd_pio_closefile
     use ESMF       , only : ESMF_FieldRegridGetArea

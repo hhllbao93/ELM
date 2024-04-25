@@ -6,7 +6,7 @@ module fileutils
   !
   ! !USES:
   use shr_sys_mod , only : shr_sys_abort
-  use clm_varctl  , only : iulog
+  use elm_varctl  , only : iulog
   use spmdMod     , only : masterproc
   !
   ! !PUBLIC TYPES:
@@ -24,7 +24,7 @@ module fileutils
 contains
 
   !-----------------------------------------------------------------------
-  character(len=256) function get_filename (fulpath)
+  character(len=512) function get_filename (fulpath)
     !
     ! !DESCRIPTION:
     ! Returns filename given full pathname

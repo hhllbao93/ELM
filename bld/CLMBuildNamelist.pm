@@ -196,7 +196,7 @@ OPTIONS
                               "-mask list" to list valid land masks.
      -namelist "namelist"     Specify namelist settings directly on the commandline by supplying
                               a string containing FORTRAN namelist syntax, e.g.,
-                                 -namelist "&clm_inparm dt=1800 /"
+                                 -namelist "&elm_inparm dt=1800 /"
      -no-megan                DO NOT PRODUCE a megan_emis_nl namelist that will go into the
                               "drv_flds_in" file for the driver to pass VOCs to the atm.
                               MEGAN (Model of Emissions of Gases and Aerosols from Nature)
@@ -1528,7 +1528,7 @@ sub process_namelist_inline_logic {
 
 
   ##############################
-  # namelist group: clm_inparm #
+  # namelist group: elm_inparm #
   ##############################
   setup_logic_site_specific($opts, $nl_flags, $definition, $defaults, $nl);
   setup_logic_lnd_frac($opts, $nl_flags, $definition, $defaults, $nl, $envxml_ref);
@@ -4204,7 +4204,7 @@ sub write_output_files {
 
   # CLM component
   my @groups;
-  @groups = qw(clm_inparm ndepdyn_nml popd_streams urbantv_streams light_streams
+  @groups = qw(elm_inparm ndepdyn_nml popd_streams urbantv_streams light_streams
                soil_moisture_streams lai_streams atm2lnd_inparm lnd2atm_inparm clm_canopyhydrology_inparm cnphenology
                clm_soilhydrology_inparm dynamic_subgrid cnvegcarbonstate
                finidat_consistency_checks dynpft_consistency_checks
@@ -4216,7 +4216,7 @@ sub write_output_files {
                cnprecision_inparm clm_glacier_behavior crop irrigation_inparm
                surfacealbedo_inparm water_tracers_inparm);
 
-  #@groups = qw(clm_inparm clm_canopyhydrology_inparm clm_soilhydrology_inparm
+  #@groups = qw(elm_inparm clm_canopyhydrology_inparm clm_soilhydrology_inparm
   #             finidat_consistency_checks dynpft_consistency_checks);
   # Eventually only list namelists that are actually used when CN on
   if ( &value_is_true($nl_flags->{'use_lch4'}) ) {
@@ -4690,7 +4690,7 @@ sub list_options {
            my @vars = $definition->get_var_names( );
            my @demands = ( "null" );
            foreach my $var ( @vars ) {
-              if ( $definition->get_group_name( $var ) ne "clm_inparm" ) { next; }
+              if ( $definition->get_group_name( $var ) ne "elm_inparm" ) { next; }
               if ( defined($defaults->get_value($var, $opts_cmdl ) ) ) {
                  push( @demands, $var );
               }
@@ -4700,7 +4700,7 @@ sub list_options {
            chomp( $doc );
            $log->exit_message("valid values for $var ($doc) :\n" .
                         "Namelist options to require: @demands\n" .
-                        "any valid namelist item for clm_inparm can be set. However, not all are\n" .
+                        "any valid namelist item for elm_inparm can be set. However, not all are\n" .
                         "available in the clm defaults file. The defaults are also dependent on\n" .
                         "resolution and landmask, as well as other settings. Hence, the list above\n" .
                         "will vary depending on what you set for resolution and landmask.");

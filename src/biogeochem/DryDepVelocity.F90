@@ -42,16 +42,6 @@ Module DryDepVelocity
   ! Author: Beth Holland and  James Sulzman
   !
   ! Modified: Francis Vitt -- 30 Mar 2007
-  ! Modified: Maria Val Martin -- 15 Jan 2014
-  !  Corrected major bugs in the leaf and stomatal resitances. The code is now
-  !  coupled to LAI and Rs uses the Ball-Berry Scheme. Also, corrected minor
-  !  bugs in rlu and rcl calculations. Added
-  !  no vegetation removal for CO. See README for details and
-  !     Val Martin et al., 2014 GRL for major corrections
-  ! Modified: Louisa Emmons -- 30 November 2017
-  !  Corrected the equation calculating stomatal resistance from rssun and rssha,
-  !     and removed factor that scaled Rs to match observations
-  !
   !-----------------------------------------------------------------------
 
   use shr_log_mod          , only : errMsg => shr_log_errMsg
@@ -59,59 +49,59 @@ Module DryDepVelocity
   use abortutils           , only : endrun
   use clm_time_manager     , only : get_nstep, get_curr_date, get_curr_time
   use spmdMod              , only : masterproc
-  use shr_drydep_mod       , only : n_drydep, drydep_list
-  use shr_drydep_mod       , only : index_o3=>o3_ndx, index_o3a=>o3a_ndx, index_so2=>so2_ndx, index_h2=>h2_ndx
-  use shr_drydep_mod       , only : index_co=>co_ndx, index_ch4=>ch4_ndx, index_pan=>pan_ndx
-  use shr_drydep_mod       , only : index_xpan=>xpan_ndx
-  use decompMod            , only : bounds_type, subgrid_level_patch
+  use seq_drydep_mod       , only : n_drydep, drydep_list
+  use seq_drydep_mod       , only : drydep_method, DD_XLND
+  use seq_drydep_mod       , only : index_o3=>o3_ndx, index_o3a=>o3a_ndx, index_so2=>so2_ndx, index_h2=>h2_ndx
+  use seq_drydep_mod       , only : index_co=>co_ndx, index_ch4=>ch4_ndx, index_pan=>pan_ndx
+  use seq_drydep_mod       , only : index_xpan=>xpan_ndx
+  use decompMod            , only : bounds_type
+  use elm_varcon           , only : namep
   use atm2lndType          , only : atm2lnd_type
   use CanopyStateType      , only : canopystate_type
-  use FrictionVelocityMod  , only : frictionvel_type
-  use PhotosynthesisMod    , only : photosyns_type
-  use WaterStateBulkType       , only : waterstatebulk_type
-  use WaterDiagnosticBulkType       , only : waterdiagnosticbulk_type
-  use Wateratm2lndBulkType       , only : wateratm2lndbulk_type
-  use GridcellType         , only : grc
-  use LandunitType         , only : lun
-  use PatchType            , only : patch
+  use FrictionVelocityType , only : frictionvel_type
+  use PhotosynthesisType   , only : photosyns_type
+  use WaterstateType       , only : waterstate_type
+  use GridcellType         , only : grc_pp
+  use TopounitDataType     , only : top_as, top_af ! atmospheric state and flux variables
+  use LandunitType         , only : lun_pp
+  use ColumnDataType       , only : col_ws
+  use VegetationType       , only : veg_pp
   !
   implicit none
+  save
   private
   !
   public :: depvel_compute
   !
   type, public :: drydepvel_type
 
-     real(r8), pointer, public  :: velocity_patch (:,:) ! Dry Deposition Velocity
-     real(r8), pointer, private :: rs_drydep_patch (:)  ! Stomatal resistance associated with dry deposition velocity for Ozone
+     real(r8), pointer, public :: velocity_patch (:,:) ! Dry Deposition Velocity
 
    contains
 
      procedure , public  :: Init
-     procedure , private :: InitAllocate
-     procedure , private :: InitHistory
+     procedure , public :: InitAllocate
 
   end type drydepvel_type
   !-----------------------------------------------------------------------
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
 
 CONTAINS
 
   !------------------------------------------------------------------------
   subroutine Init(this, bounds)
 
-    use clm_varctl     , only : use_fates, use_fates_sp
+    use elm_varctl     , only : use_fates, use_fates_sp
+
     class(drydepvel_type) :: this
     type(bounds_type), intent(in) :: bounds
 
-    if ( (.not. use_fates_sp) .and. use_fates .and. (n_drydep > 0) ) then
-       call endrun( msg='ERROR: Dry-deposition currently does NOT work with FATES outside of FATES-SP mode (see github issue #1044)'//&
-                    errMsg(sourcefile, __LINE__))
+    if ( (.not. use_fates_sp) .and. use_fates .and. &
+         (n_drydep > 0 .and. drydep_method == DD_XLND) )then
+       call endrun('ERROR: Dry-deposition currently does NOT work with FATES outside of FATES-SP mode'//&
+            errMsg(__FILE__, __LINE__))
     end if
+    
     call this%InitAllocate(bounds)
-    call this%InitHistory(bounds)
 
   end subroutine Init
 
@@ -120,7 +110,8 @@ CONTAINS
     !
     ! !USES:
     use shr_infnan_mod , only : nan => shr_infnan_nan, assignment(=)
-    use shr_drydep_mod , only : n_drydep
+    use seq_drydep_mod , only : n_drydep, drydep_method, DD_XLND
+    use elm_varcon , only : spval
     !
     ! !ARGUMENTS:
     class(drydepvel_type) :: this
@@ -133,100 +124,52 @@ CONTAINS
     begp = bounds%begp; endp= bounds%endp
 
     ! Dry Deposition Velocity
-    if ( n_drydep > 0 )then
-       allocate(this%velocity_patch(begp:endp, n_drydep));  this%velocity_patch(:,:) = nan
-       allocate(this%rs_drydep_patch(begp:endp))         ;  this%rs_drydep_patch(:)  = nan
+    if ( n_drydep > 0 .and. drydep_method == DD_XLND )then
+       allocate(this%velocity_patch(begp:endp, n_drydep));  this%velocity_patch(:,:) = spval
     end if
 
   end subroutine InitAllocate
 
   !-----------------------------------------------------------------------
-  subroutine InitHistory(this, bounds)
-    !
-    ! !DESCRIPTION:
-    ! Initialize history output fields for dry deposition diagnositics
-    !
-    ! !USES
-    use clm_varcon     , only : spval
-    use histFileMod    , only : hist_addfld1d
-    use shr_drydep_mod , only : mapping
-    !
-    ! !ARGUMENTS:
-    class(drydepvel_type) :: this
-    type(bounds_type), intent(in) :: bounds
-    real(r8), pointer  :: ptr_1d(:)  ! pointer to 1d patch array
-    !
-    ! !LOCAL VARIABLES
-    integer :: ispec
-    integer :: begp, endp
-    !---------------------------------------------------------------------
-
-    begp = bounds%begp; endp = bounds%endp
-
-    if ( n_drydep == 0 ) return
-
-    do ispec=1,n_drydep
-       if(mapping(ispec) <= 0) cycle
-
-       this%velocity_patch(begp:endp,ispec)= spval
-       ptr_1d => this%velocity_patch(begp:endp,ispec)
-       call hist_addfld1d ( fname='DRYDEPV_'//trim(drydep_list(ispec)), units='cm/sec',  &
-            avgflag='A', long_name='Dry Deposition Velocity', &
-            ptr_patch=ptr_1d, default='inactive' )
-    end do
-
-    this%rs_drydep_patch(begp:endp)= spval
-    call hist_addfld1d ( fname='RS_DRYDEP_O3', units='s/m',  &
-         avgflag='A', long_name='Stomatal Resistance Associated with Ozone Dry Deposition Velocity', &
-         ptr_patch=this%rs_drydep_patch, default='inactive' )
-
-  end subroutine InitHistory
-
-  !-----------------------------------------------------------------------
   subroutine depvel_compute( bounds, &
-       atm2lnd_inst, canopystate_inst, waterstatebulk_inst, waterdiagnosticbulk_inst, &
-       wateratm2lndbulk_inst, frictionvel_inst, &
-       photosyns_inst, drydepvel_inst)
+       atm2lnd_vars, canopystate_vars, frictionvel_vars, &
+       photosyns_vars, drydepvel_vars)
     !
     ! !DESCRIPTION:
     ! computes the dry deposition velocity of tracers
     !
     ! !USES:
+      !$acc routine seq
     use shr_const_mod  , only : tmelt => shr_const_tkfrz
-    use shr_drydep_mod , only : shr_drydep_setHCoeff, mapping, drat, foxd
-    use shr_drydep_mod , only : rcls, h2_a, h2_b, h2_c, ri, rac, rclo, rlu, rgss, rgso
-    use landunit_varcon, only : istsoil, istice, istdlak, istwet
-    use clm_varctl     , only : iulog
-    use pftconMod      , only : noveg, ndllf_evr_tmp_tree, ndllf_evr_brl_tree
-    use pftconMod      , only : ndllf_dcd_brl_tree, nbrdlf_evr_trp_tree
-    use pftconMod      , only : nbrdlf_evr_tmp_tree, nbrdlf_dcd_trp_tree
-    use pftconMod      , only : nbrdlf_dcd_tmp_tree, nbrdlf_dcd_brl_tree
-    use pftconMod      , only : nbrdlf_evr_shrub, nbrdlf_dcd_tmp_shrub
-    use pftconMod      , only : nbrdlf_dcd_brl_shrub,nc3_arctic_grass
-    use pftconMod      , only : nc3_nonarctic_grass, nc4_grass, nc3crop
-    use pftconMod      , only : nc3irrig, npcropmin, npcropmax
-    use clm_varcon     , only : spval
-
+    use seq_drydep_mod , only : seq_drydep_setHCoeff, mapping, drat, foxd
+    use seq_drydep_mod , only : rcls, h2_a, h2_b, h2_c, ri, rac, rclo, rlu, rgss, rgso
+    use landunit_varcon, only : istsoil, istice, istice_mec, istdlak, istwet
+    use elm_varctl     , only : iulog
+    use pftvarcon      , only : noveg, ndllf_evr_tmp_tree, ndllf_evr_brl_tree
+    use pftvarcon      , only : ndllf_dcd_brl_tree, nbrdlf_evr_trp_tree
+    use pftvarcon      , only : nbrdlf_evr_tmp_tree, nbrdlf_dcd_trp_tree
+    use pftvarcon      , only : nbrdlf_dcd_tmp_tree, nbrdlf_dcd_brl_tree
+    use pftvarcon      , only : nbrdlf_evr_shrub, nbrdlf_dcd_tmp_shrub
+    use pftvarcon      , only : nbrdlf_dcd_brl_shrub,nc3_arctic_grass
+    use pftvarcon      , only : nc3_nonarctic_grass, nc4_grass, nc3crop
+    use pftvarcon      , only : nc3irrig, npcropmin, npcropmax
     !
     ! !ARGUMENTS:
     type(bounds_type)      , intent(in)    :: bounds
-    type(atm2lnd_type)     , intent(in)    :: atm2lnd_inst
-    type(canopystate_type) , intent(in)    :: canopystate_inst
-    type(waterstatebulk_type)  , intent(in)    :: waterstatebulk_inst
-    type(waterdiagnosticbulk_type)  , intent(in)    :: waterdiagnosticbulk_inst
-    type(wateratm2lndbulk_type)  , intent(in)    :: wateratm2lndbulk_inst
-    type(frictionvel_type) , intent(in)    :: frictionvel_inst
-    type(photosyns_type)   , intent(in)    :: photosyns_inst
-    type(drydepvel_type)   , intent(inout) :: drydepvel_inst
+    type(atm2lnd_type)     , intent(in)    :: atm2lnd_vars
+    type(canopystate_type) , intent(in)    :: canopystate_vars
+    type(frictionvel_type) , intent(in)    :: frictionvel_vars
+    type(photosyns_type)   , intent(in)    :: photosyns_vars
+    type(drydepvel_type)   , intent(inout) :: drydepvel_vars
     !
     ! !LOCAL VARIABLES:
     integer  :: c
     real(r8) :: soilw, var_soilw, fact_h2, dv_soil_h2
-    integer  :: pi,g, l
+    integer  :: pi,g,t,l
     integer  :: ispec
     integer  :: length
     integer  :: wesveg       !wesely vegegation index
-    integer  :: clmveg       !clm veg index from ivegtype
+    integer  :: elmveg       !elm veg index from ivegtype
     integer  :: i
     integer  :: index_season !seasonal index based on LAI.  This indexs wesely data tables
     integer  :: nstep        !current step
@@ -234,6 +177,7 @@ CONTAINS
 
     real(r8) :: pg           ! surface pressure
     real(r8) :: tc           ! temperature in celsius
+    real(r8) :: rs           ! constant for calculating rsmx
     real(r8) :: es           ! saturation vapor pressur
     real(r8) :: ws           ! saturation mixing ratio
     real(r8) :: rmx          ! resistance by vegetation
@@ -249,25 +193,21 @@ CONTAINS
     real(r8) :: sfc_temp     ! surface temp
     real(r8) :: minlai       ! minimum of monthly lai
     real(r8) :: maxlai       ! maximum of monthly lai
-    real(r8) :: rds         ! resistance for aerosols
-
-    !mvm 11/30/2013
-    real(r8) :: rlu_lai      ! constant to calculate rlu over bulk canopy
+    real(r8) :: rds
 
     logical  :: has_dew
     logical  :: has_rain
     real(r8), parameter :: rain_threshold      = 1.e-7_r8  ! of the order of 1cm/day expressed in m/s
 
     ! local arrays: dependent on species only
-    real(r8), dimension(n_drydep) :: rsmx  !vegetative resistance (plant mesophyll)
+    real(r8), dimension(n_drydep) :: rsmx !vegetative resistance (plant mesophyll)
     real(r8), dimension(n_drydep) :: rclx !lower canopy resistance
     real(r8), dimension(n_drydep) :: rlux !vegetative resistance (upper canopy)
     real(r8), dimension(n_drydep) :: rgsx !gournd resistance
     real(r8), dimension(n_drydep) :: heff
-    real(r8) :: rs    ! stomatal resistance associated with dry deposition velocity (s/m)
     real(r8) :: rc    !combined surface resistance
     real(r8) :: cts   !correction to flu rcl and rgs for frost
-    real(r8) :: rlux_o3 !to calculate O3 leaf resistance in dew/rain conditions
+    real(r8) :: rlux_o3
 
     ! constants
     real(r8), parameter :: slope = 0._r8      ! Used to calculate  rdc in (lower canopy resistance)
@@ -282,83 +222,86 @@ CONTAINS
                                 0.005_r8, 0.000_r8, 0.000_r8, 0.000_r8, 0.075_r8, 0.002_r8 /)
     !-----------------------------------------------------------------------
 
-    if ( n_drydep == 0 ) return
+    if ( n_drydep == 0 .or. drydep_method /= DD_XLND ) return
 
     associate(                                                    &
-         forc_solai =>    atm2lnd_inst%forc_solai_grc           , & ! Input:  [real(r8) (:,:) ] direct beam radiation (visible only)
-         forc_solad =>    atm2lnd_inst%forc_solad_grc           , & ! Input:  [real(r8) (:,:) ] direct beam radiation (visible only)
-         forc_t     =>    atm2lnd_inst%forc_t_downscaled_col    , & ! Input:  [real(r8) (:)   ] downscaled atmospheric temperature (Kelvin)
-         forc_q     =>    wateratm2lndbulk_inst%forc_q_downscaled_col    , & ! Input:  [real(r8) (:)   ] downscaled atmospheric specific humidity (kg/kg)
-         forc_pbot  =>    atm2lnd_inst%forc_pbot_downscaled_col , & ! Input:  [real(r8) (:)   ] downscaled surface pressure (Pa)
-         forc_rain  =>    wateratm2lndbulk_inst%forc_rain_downscaled_col , & ! Input:  [real(r8) (:)   ] downscaled rain rate [mm/s]
+         forc_solai =>    top_af%solai                          , & ! Input:  [real(r8) (:,:) ] direct beam radiation (W/m**2)
+         forc_solad =>    top_af%solad                          , & ! Input:  [real(r8) (:,:) ] diffuse beam radiation (W/m**2)
+         forc_t     =>    top_as%tbot                           , & ! Input:  [real(r8) (:)   ] atmospheric temperature (Kelvin)
+         forc_q     =>    top_as%qbot                           , & ! Input:  [real(r8) (:)   ] atmospheric specific humidity (kg/kg)
+         forc_psrf  =>    top_as%pbot                           , & ! Input:  [real(r8) (:)   ] surface pressure (Pa)
+         forc_rain  =>    top_af%rain                           , & ! Input:  [real(r8) (:)   ] rain rate (kg H2O/m**2/s, or mm liquid H2O/s)
 
-         h2osoi_vol =>    waterstatebulk_inst%h2osoi_vol_col        , & ! Input:  [real(r8) (:,:) ] volumetric soil water (0<=h2osoi_vol<=watsat)
-         snow_depth =>    waterdiagnosticbulk_inst%snow_depth_col        , & ! Input:  [real(r8) (:)   ] snow height (m)
+         h2osoi_vol =>    col_ws%h2osoi_vol        , & ! Input:  [real(r8) (:,:) ] volumetric soil water (0<=h2osoi_vol<=watsat)
+         snow_depth =>    col_ws%snow_depth        , & ! Input:  [real(r8) (:)   ] snow height (m)
 
-         ram1       =>    frictionvel_inst%ram1_patch           , & ! Input:  [real(r8) (:)   ] aerodynamical resistance
-         rb1        =>    frictionvel_inst%rb1_patch            , & ! Input:  [real(r8) (:)   ] leaf boundary layer resistance [s/m]
-         vds        =>    frictionvel_inst%vds_patch            , & ! Input:  [real(r8) (:)   ] aerodynamical resistance
+         ram1       =>    frictionvel_vars%ram1_patch           , & ! Input:  [real(r8) (:)   ] aerodynamical resistance
+         rb1        =>    frictionvel_vars%rb1_patch            , & ! Input:  [real(r8) (:)   ] leaf boundary layer resistance [s/m]
+         vds        =>    frictionvel_vars%vds_patch            , & ! Input:  [real(r8) (:)   ] aerodynamical resistance
 
-         rssun      =>    photosyns_inst%rssun_patch            , & ! Input:  [real(r8) (:)   ] stomatal resistance
-         rssha      =>    photosyns_inst%rssha_patch            , & ! Input:  [real(r8) (:)   ] shaded stomatal resistance (s/m)
+         rssun      =>    photosyns_vars%rssun_patch            , & ! Input:  [real(r8) (:)   ] stomatal resistance
+         rssha      =>    photosyns_vars%rssha_patch            , & ! Input:  [real(r8) (:)   ] shaded stomatal resistance (s/m)
 
-         fsun       =>    canopystate_inst%fsun_patch           , & ! Input:  [real(r8) (:)   ] sunlit fraction of canopy
-         elai       =>    canopystate_inst%elai_patch           , & ! Input:  [real(r8) (:)   ] one-sided leaf area index with burying by snow
-         mlaidiff   =>    canopystate_inst%mlaidiff_patch       , & ! Input:  [real(r8) (:)   ] difference in lai between month one and month two
-         annlai     =>    canopystate_inst%annlai_patch         , & ! Input:  [real(r8) (:,:) ] 12 months of monthly lai from input data set
+         fsun       =>    canopystate_vars%fsun_patch           , & ! Input:  [real(r8) (:)   ] sunlit fraction of canopy
+         elai       =>    canopystate_vars%elai_patch           , & ! Input:  [real(r8) (:)   ] one-sided leaf area index with burying by snow
+         mlaidiff   =>    canopystate_vars%mlaidiff_patch       , & ! Input:  [real(r8) (:)   ] difference in lai between month one and month two
+         annlai     =>    canopystate_vars%annlai_patch         , & ! Input:  [real(r8) (:,:) ] 12 months of monthly lai from input data set
 
-         velocity   =>    drydepvel_inst%velocity_patch         , & ! Output: [real(r8) (:,:) ] cm/sec
-         rs_drydep  =>    drydepvel_inst%rs_drydep_patch          & ! Output: [real(r8) (:)   ]  stomatal resistance associated with Ozone dry deposition velocity (s/m)
+         velocity   =>    drydepvel_vars%velocity_patch           & ! Output: [real(r8) (:,:) ] cm/sec
          )
 
       !_________________________________________________________________
       ! Begin loop through patches
 
       pft_loop: do pi = bounds%begp,bounds%endp
-         l = patch%landunit(pi)
+         l = veg_pp%landunit(pi)
 
-         active: if (patch%active(pi)) then
+         active: if (veg_pp%active(pi)) then
 
-            c = patch%column(pi)
-            g = patch%gridcell(pi)
-            pg         = forc_pbot(c)
-            spec_hum   = forc_q(c)
-            rain       = forc_rain(c)
-            sfc_temp   = forc_t(c)
-            solar_flux = forc_solad(g,1)
-            lat        = grc%latdeg(g)
-            lon        = grc%londeg(g)
-            clmveg     = patch%itype(pi)
+            c = veg_pp%column(pi)
+            t = veg_pp%topounit(pi)
+            g = veg_pp%gridcell(pi)
+            !solar_flux = forc_lwrad  !rename CLM variables to fit with Dry Dep variables
+
+            pg         = forc_psrf(t)
+            spec_hum   = forc_q(t)
+            rain       = forc_rain(t)
+            sfc_temp   = forc_t(t)
+            solar_flux = forc_solad(t,1)
+            lat        = grc_pp%latdeg(g)
+            lon        = grc_pp%londeg(g)
+            elmveg     = veg_pp%itype(pi)
             soilw      = h2osoi_vol(c,1)
 
-            !map CLM veg type into Wesely veg type
+            !map ELM veg type into Wesely veg type
             wesveg = wveg_unset
-            if (clmveg == noveg                               ) wesveg = 8
-            if (clmveg == ndllf_evr_tmp_tree                  ) wesveg = 5
-            if (clmveg == ndllf_evr_brl_tree                  ) wesveg = 5
-            if (clmveg == ndllf_dcd_brl_tree                  ) wesveg = 5
-            if (clmveg == nbrdlf_evr_trp_tree                 ) wesveg = 4
-            if (clmveg == nbrdlf_evr_tmp_tree                 ) wesveg = 4
-            if (clmveg == nbrdlf_dcd_trp_tree                 ) wesveg = 4
-            if (clmveg == nbrdlf_dcd_tmp_tree                 ) wesveg = 4
-            if (clmveg == nbrdlf_dcd_brl_tree                 ) wesveg = 4
-            if (clmveg == nbrdlf_evr_shrub                    ) wesveg = 11
-            if (clmveg == nbrdlf_dcd_tmp_shrub                ) wesveg = 11
-            if (clmveg == nbrdlf_dcd_brl_shrub                ) wesveg = 11
-            if (clmveg == nc3_arctic_grass                    ) wesveg = 3
-            if (clmveg == nc3_nonarctic_grass                 ) wesveg = 3
-            if (clmveg == nc4_grass                           ) wesveg = 3
-            if (clmveg == nc3crop                             ) wesveg = 2
-            if (clmveg == nc3irrig                            ) wesveg = 2
-            if (clmveg >= npcropmin .and. clmveg <= npcropmax ) wesveg = 2
+            if (elmveg == noveg                               ) wesveg = 8
+            if (elmveg == ndllf_evr_tmp_tree                  ) wesveg = 5
+            if (elmveg == ndllf_evr_brl_tree                  ) wesveg = 5
+            if (elmveg == ndllf_dcd_brl_tree                  ) wesveg = 5
+            if (elmveg == nbrdlf_evr_trp_tree                 ) wesveg = 4
+            if (elmveg == nbrdlf_evr_tmp_tree                 ) wesveg = 4
+            if (elmveg == nbrdlf_dcd_trp_tree                 ) wesveg = 4
+            if (elmveg == nbrdlf_dcd_tmp_tree                 ) wesveg = 4
+            if (elmveg == nbrdlf_dcd_brl_tree                 ) wesveg = 4
+            if (elmveg == nbrdlf_evr_shrub                    ) wesveg = 11
+            if (elmveg == nbrdlf_dcd_tmp_shrub                ) wesveg = 11
+            if (elmveg == nbrdlf_dcd_brl_shrub                ) wesveg = 11
+            if (elmveg == nc3_arctic_grass                    ) wesveg = 3
+            if (elmveg == nc3_nonarctic_grass                 ) wesveg = 3
+            if (elmveg == nc4_grass                           ) wesveg = 3
+            if (elmveg == nc3crop                             ) wesveg = 2
+            if (elmveg == nc3irrig                            ) wesveg = 2
+            if (elmveg >= npcropmin .and. elmveg <= npcropmax ) wesveg = 2
+#ifndef _OPENACC
             if (wesveg == wveg_unset )then
-               write(iulog,*) 'clmveg = ', clmveg, 'lun%itype = ', lun%itype(l)
-               call endrun(subgrid_index=pi, subgrid_level=subgrid_level_patch, &
+               write(iulog,*) 'elmveg = ', elmveg, 'lun_pp%itype = ', lun_pp%itype(l)
+               call endrun(decomp_index=pi, elmlevel=namep, &
                     msg='ERROR: Not able to determine Wesley vegetation type'//&
-                    errMsg(sourcefile, __LINE__))
+                    errMsg(__FILE__, __LINE__))
             end if
-
-            ! create seasonality index used to index wesely data tables from LAI,  Bascially
+#endif
+            ! creat seasonality index used to index wesely data tables from LAI,  Bascially
             !if elai is between max lai from input data and half that max the index_season=1
 
 
@@ -382,17 +325,17 @@ CONTAINS
 
             index_season = -1
 
-            if ( lun%itype(l) /= istsoil )then
-               if ( lun%itype(l) == istice ) then
+            if ( lun_pp%itype(l) /= istsoil )then
+               if ( lun_pp%itype(l) == istice .or. lun_pp%itype(l) == istice_mec ) then
                   wesveg       = 8
                   index_season = 4
-               elseif ( lun%itype(l) == istdlak ) then
+               elseif ( lun_pp%itype(l) == istdlak ) then
                   wesveg       = 7
                   index_season = 4
-               elseif ( lun%itype(l) == istwet ) then
+               elseif ( lun_pp%itype(l) == istwet ) then
                   wesveg       = 9
                   index_season = 2
-               elseif ( lun%urbpoi(l) ) then
+               elseif ( lun_pp%urbpoi(l) ) then
                   wesveg       = 1
                   index_season = 2
                end if
@@ -403,7 +346,7 @@ CONTAINS
             endif
 
             if (index_season<0) then
-               if (elai(pi) < (minlai+0.05_r8*(maxlai-minlai))) then
+               if (elai(pi) < (minlai+0.05*(maxlai-minlai))) then
                   index_season = 3
                endif
             endif
@@ -419,7 +362,7 @@ CONTAINS
             endif
 
             if (index_season<0) then
-               call endrun('ERROR: not able to determine season'//errmsg(sourcefile, __LINE__))
+               call endrun('ERROR: not able to determine season'//errmsg(__FILE__, __LINE__))
             endif
 
             ! saturation specific humidity
@@ -444,9 +387,15 @@ CONTAINS
                dewm = 1._r8
             end if
 
-            !Define tc
-            tc = sfc_temp - tmelt
+            !
+            ! constant in determining rs
+            !
+            crs = 1.e36_r8
 
+            tc = sfc_temp - tmelt
+            if(sfc_temp > tmelt.and.sfc_temp < 313.15_r8) then
+               crs = (1._r8+(200._r8/(solar_flux+.1_r8))**2) * (400._r8/(tc*(40._r8-tc)))
+            endif
             !
             ! rdc (lower canopy res)
             !
@@ -455,13 +404,16 @@ CONTAINS
             ! surface resistance : depends on both land type and species
             ! land types are computed seperately, then resistance is computed as average of values
             ! following wesely rc=(1/(rs+rm) + 1/rlu +1/(rdc+rcl) + 1/(rac+rgs))**-1
+            !
+            ! compute rsmx = 1/(rs+rm) : multiply by 3 if surface is wet
+            !
 
             !*******************************************************
-            call shr_drydep_setHCoeff( sfc_temp, heff(:n_drydep) )
+            call seq_drydep_setHCoeff( sfc_temp, heff(:n_drydep) )
             !*********************************************************
 
             species_loop1: do ispec=1, n_drydep
-               if(mapping(ispec) <= 0) cycle
+               if(mapping(ispec)<=0) cycle
 
                if(ispec.eq.index_o3.or.ispec.eq.index_o3a.or.ispec.eq.index_so2) then
                   rmx=0._r8
@@ -470,11 +422,9 @@ CONTAINS
                endif
 
                ! correction for frost
-               cts = 1000._r8*exp( -tc - 4._r8 )
-
-               !ground resistance
-               rgsx(ispec) = 1._r8/((heff(ispec)/(1.e5_r8*(rgss(index_season,wesveg)+cts))) + &
-                    (foxd(ispec)/(rgso(index_season,wesveg)+cts)))
+               cts = 1000._r8*exp( -tc - 4._r8 )                 ! correction for frost
+               rgsx(ispec) = cts + 1._r8/((heff(ispec)/(1.e5_r8*rgss(index_season,wesveg))) + &
+                    (foxd(ispec)/rgso(index_season,wesveg)))
 
                !-------------------------------------------------------------------------------------
                ! special case for H2 and CO;; CH4 is set ot a fraction of dv(H2)
@@ -488,12 +438,11 @@ CONTAINS
                   elseif ( ispec == index_ch4 ) then
                      fact_h2 = 50.0_r8
                   end if
-
                   !-------------------------------------------------------------------------------------
                   ! no deposition on snow, ice, desert, and water
                   !-------------------------------------------------------------------------------------
                   if( wesveg == 1 .or. wesveg == 7 .or. wesveg == 8 .or. index_season == 4 ) then
-                     rgsx(ispec) = spval
+                     rgsx(ispec) = 1.e36_r8
                   else
                      var_soilw = max( .1_r8,min( soilw,.3_r8 ) )
                      if( wesveg == 3 ) then
@@ -507,146 +456,116 @@ CONTAINS
                end if
 
                !-------------------------------------------------------------------------------------
-               ! no deposition on water or no vegetation or snow (elai<=0)
+               ! no deposition on snow, ice, desert, and water
                !-------------------------------------------------------------------------------------
-
-               no_dep: if( wesveg == 7 .or. elai(pi).le.0_r8 ) then !mvm 11/26/2013
-                  rclx(ispec)  = spval
-                  rsmx(ispec)  = spval
-                  rlux(ispec)  = spval
-                  rs           = spval
+               if( wesveg == 1 .or. wesveg == 7 .or. wesveg == 8 .or. index_season == 4 ) then
+                  rclx(ispec)=1.e36_r8
+                  rsmx(ispec)=1.e36_r8
+                  rlux(ispec)=1.e36_r8
                else
 
-                  !Stomatal resistance
-
-                  ! fvitt -- at midnight rssun and/or rssha can be zero in some places which sets rs to zero
-                  ! --- this fix prevents divide by zero error (when rsmx is zero)
-                  if (rssun(pi)>0._r8 .and. rssun(pi)<1.e30 .and. rssha(pi)>0._r8 .and. rssha(pi)<1.e30 ) then
-                     !LKE: corrected rs to add rssun and rssha in parallel (11/30/2017)
-                     rs=1._r8/(fsun(pi)*elai(pi)/rssun(pi) + (1.-fsun(pi))*elai(pi)/rssha(pi))
+                  !Following Emmons et al (2020, JAMES), the stomatal resistances for shaded and sunlit
+                  !leaves should be added in parallel
+                  rs = 1.0_r8 / ( fsun(pi)/rssun(pi) + (1.0_r8 - fsun(pi))/rssha(pi) )
+                  if (rs==0._r8) then ! fvitt -- what to do when rs is zero ???
+                     rsmx(ispec) = 1.e36_r8
                   else
-                     rs=spval
+                     rsmx(ispec) = dewm*rs*drat(ispec)+rmx
                   endif
 
-                  rsmx(ispec) = rs*drat(ispec)+rmx
+                  rclx(ispec) = cts + 1._r8/((heff(ispec)/(1.e5_r8*rcls(index_season,wesveg))) + &
+                       (foxd(ispec)/rclo(index_season,wesveg)))
+                  rlux(ispec) = cts + rlu(index_season,wesveg)/(1.e-5_r8*heff(ispec)+foxd(ispec))
 
-                  ! Leaf resistance
-                  !MVM: adjusted rlu by LAI to get leaf resistance over bulk canopy (gao and wesely, 1995)
-                  rlu_lai=cts+rlu(index_season,wesveg)/elai(pi)
-                  rlux(ispec) = rlu_lai/(1.e-5_r8*heff(ispec)+foxd(ispec))
-
-                  !Lower canopy resistance
-                  rclx(ispec) = 1._r8/((heff(ispec)/(1.e5_r8*(rcls(index_season,wesveg)+cts))) + &
-                       (foxd(ispec)/(rclo(index_season,wesveg)+cts)))
-
-                  !-----------------------------------
-                  !mvm 11/30/2013: special case for CO
-                  !Dry deposition of CO and hydrocarbons is negligibly
-                  !small in vegetation [Mueller and Brasseur, 1995].
-                  !------------------------------------
-                  if( ispec == index_co ) then
-                     rclx(ispec)   = spval
-                     rsmx(ispec)   = spval
-                     rlux(ispec)   = spval
-                  endif
-
-                  !--------------------------------------------
+                  !-------------------------------------------------------------------------------------
                   ! jfl : special case for PAN
-                  !--------------------------------------------
-                  if( ispec == index_pan ) then
-                     dv_pan =  c0_pan(wesveg) * (1._r8 - exp(-k_pan(wesveg)*(rs*drat(ispec))*1.e-2_r8 ))
-
+                  !-------------------------------------------------------------------------------------
+                  if( ispec == index_pan .or. ispec == index_xpan ) then
+                     dv_pan =  c0_pan(wesveg) * (1._r8 - exp( -k_pan(wesveg)*(dewm*rs*drat(ispec))*1.e-2_r8 ))
                      if( dv_pan > 0._r8 .and. index_season /= 4 ) then
                         rsmx(ispec) = ( 1._r8/dv_pan )
                      end if
                   end if
 
-               endif no_dep
-               if ( ispec == index_o3 )then
-                  rs_drydep(pi) = rs
-               end if
+               endif
 
             end do species_loop1
 
-
-            !----------------------------------------------
-            !Adjustment for dew and rain in leaf resitances
-            !---------------------------------------------
+            !
             ! no effect over water
-            no_water: if( wesveg.ne.7 ) then
-               !MVM: effect only on vegetated areas (elai> 0)
-               with_LAI: if (elai(pi).gt.0._r8) then
+            !
+            no_water: if( wesveg/=1 .and. wesveg/=7 .and. wesveg/=8 .and. index_season/=4 ) then
+               !
+               ! no effect if sfc_temp < O C
+               !
+               non_freezing: if(sfc_temp > tmelt) then
 
-                  !
-                  ! no effect if sfc_temp < O C
-                  !
-                  non_freezing: if(sfc_temp.gt.tmelt) then
-                     if( has_dew ) then
-                        rlu_lai=cts+rlu(index_season,wesveg)/elai(pi)
-                        rlux_o3 = 1._r8/((1._r8/3000._r8)+(1._r8/(3._r8*rlu_lai)))
-
-                        if (index_o3 > 0) then
-                           rlux(index_o3) = rlux_o3
-                        endif
-                        if (index_o3a > 0) then
-                           rlux(index_o3a) = rlux_o3
-                        endif
+                  if( has_dew ) then
+                     rlux_o3 = 1._r8/((1._r8/3000._r8)+(1._r8/(3._r8*rlu(index_season,wesveg))))
+                     if (index_o3 > 0) then
+                        rlux(index_o3) = rlux_o3
                      endif
-
-                     if(has_rain) then
-                        rlu_lai=cts+rlu(index_season,wesveg)/elai(pi)
-                        rlux_o3 = 1._r8/((1._r8/1000._r8)+(1._r8/(3._r8*rlu_lai)))
-
-                        if (index_o3 > 0) then
-                           rlux(index_o3) = rlux_o3
-                        endif
-                        if (index_o3a > 0) then
-                           rlux(index_o3a) = rlux_o3
-                        endif
+                     if (index_o3a > 0) then
+                        rlux(index_o3a) = rlux_o3
                      endif
+                  endif
 
-                     species_loop2: do ispec=1,n_drydep
-                        if(mapping(ispec).le.0) cycle
-                        if(ispec.ne.index_o3.and.ispec.ne.index_o3a.and.ispec.ne.index_so2) then
+                  if(has_rain) then
+                     rlux_o3 = 1._r8/((1._r8/1000._r8)+(1._r8/(3._r8*rlu(index_season,wesveg))))
+                     if (index_o3 > 0) then
+                        rlux(index_o3) = rlux_o3
+                     endif
+                     if (index_o3a > 0) then
+                        rlux(index_o3a) = rlux_o3
+                     endif
+                  endif
 
-                           if( has_dew .or. has_rain) then
-                              rlu_lai=cts+rlu(index_season,wesveg)/elai(pi)
-                              rlux(ispec)=1._r8/((1._r8/(3._r8*rlu_lai))+ &
-                                   (1.e-7_r8*heff(ispec))+(foxd(ispec)/rlux_o3))
-                           endif
+                  if ( index_o3 > 0 ) then
+                     rclx(index_o3) = cts + rclo(index_season,wesveg)
+                     rlux(index_o3) = cts + rlux(index_o3)
+                  end if
+                  if ( index_o3a > 0 ) then
+                     rclx(index_o3a) = cts + rclo(index_season,wesveg)
+                     rlux(index_o3a) = cts + rlux(index_o3a)
+                  end if
 
-                        elseif(ispec.eq.index_so2) then
+                  species_loop2: do ispec=1,n_drydep
+                     if (mapping(ispec) <= 0) cycle
+                     if (ispec/=index_o3 .and. ispec/=index_o3a .and. ispec/=index_so2) then
 
-                           if( has_dew ) then
-                              rlux(ispec) = 100._r8
-                           endif
-
-                           if(has_rain) then
-                              rlu_lai=cts+rlu(index_season,wesveg)/elai(pi)
-                              rlux(ispec) = 1._r8/((1._r8/5000._r8)+(1._r8/(3._r8*rlu_lai)))
-                           endif
-
-                           if( has_dew .or. has_rain ) then
-                              !MVM:rlux=50 for SO2 in dew or rain only for *urban land* type surfaces.
-                              if (wesveg.eq.1) then
-                                 rlux(ispec)=50._r8
-                              endif
-                           endif
-                        end if
-                        !mvm 11/30/2013: special case for CO
-                        if( ispec.eq.index_co ) then
-                           rlux(ispec) = spval
+                        if( has_dew ) then
+                           rlux(ispec)=1._r8/((1._r8/(3._r8*rlux(ispec)))+ &
+                                (1.e-7_r8*heff(ispec))+(foxd(ispec)/rlux_o3))
                         endif
-                     end do species_loop2
-                  endif non_freezing
-               endif with_LAI
+
+                     elseif(ispec.eq.index_so2) then
+
+                        if( has_dew ) then
+                           rlux(ispec) = 100._r8
+                        endif
+
+                        if(has_rain) then
+                           rlux(ispec) = 1._r8/((1._r8/5000._r8)+(1._r8/(3._r8*rlu(index_season,wesveg))))
+                        endif
+
+                        rclx(ispec) = cts + rcls(index_season,wesveg)
+                        rlux(ispec) = cts + rlux(ispec)
+
+                        if( has_dew .or. has_rain ) then
+                           rlux(ispec)=50._r8
+                        endif
+
+                     endif
+                  end do species_loop2
+
+               endif non_freezing
+
             endif no_water
 
-            ! resistance for aerosols
             rds = 1._r8/vds(pi)
 
             species_loop3: do ispec=1,n_drydep
-               if(mapping(ispec) <= 0) cycle
+               if(mapping(ispec)<=0) cycle
 
                !
                ! compute rc
@@ -670,16 +589,16 @@ CONTAINS
                   velocity(pi,ispec) = 0.2_r8
                case ( 'CB1', 'CB2', 'OC1', 'OC2', 'SOAM', 'SOAI', 'SOAT', 'SOAB', 'SOAX' )
                   velocity(pi,ispec) = 0.10_r8
-               case ( 'SO2' )
-                  velocity(pi,ispec) = (1._r8/(ram1(pi)+rb1(pi)+rc))*200._r8
                case default
                   velocity(pi,ispec) = (1._r8/(ram1(pi)+rb1(pi)+rc))*100._r8
                end select
             end do species_loop3
+
          endif active
+
       end do pft_loop
 
-     end associate
+    end associate
 
   end subroutine depvel_compute
 

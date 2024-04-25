@@ -292,7 +292,7 @@ YEAR:   foreach my $sim_year ( $definition->get_valid_values( "sim_year", 'noquo
                  } else {
                     $settings{'maxpft'} = 17;
                  }
-                 $inputopts{'namelist'} = "clm_inparm";
+                 $inputopts{'namelist'} = "elm_inparm";
                  &GetListofNeededFiles( \%inputopts, \%settings, \%files );
                  if ( $printTimes >= 1 ) {
                     $inputopts{'printing'} = 0;
@@ -304,7 +304,7 @@ YEAR:   foreach my $sim_year ( $definition->get_valid_values( "sim_year", 'noquo
         # Now do sim-year ranges
         #
         $settings{'bgc'}       = "cn";
-        $inputopts{'namelist'} = "clm_inparm";
+        $inputopts{'namelist'} = "elm_inparm";
         foreach my $sim_year_range ( $definition->get_valid_values( "sim_year_range", 'noquotes'=>1 ) ) {
            $settings{'sim_year_range'} = $sim_year_range;
            if ( $sim_year_range =~ /([0-9]+)-([0-9]+)/ ) {

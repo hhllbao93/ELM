@@ -17,10 +17,11 @@ module ncdio_pio
   use shr_log_mod    , only : errMsg => shr_log_errMsg
   use spmdMod        , only : masterproc, mpicom, iam, npes
   use spmdMod        , only : MPI_REAL8, MPI_INTEGER, MPI_LOGICAL
-  use clm_varcon     , only : spval, ispval, grlnd
-  use clm_varctl     , only : single_column, iulog
+  use elm_varcon     , only : nameg, namet, namel, namec, namep
+  use elm_varcon     , only : spval,ispval, grlnd
+  use elm_varctl     , only : single_column, iulog
   use shr_sys_mod    , only : shr_sys_flush
-  use decompMod      , only : get_subgrid_level_from_name, get_subgrid_level_gsize, get_subgrid_level_gindex
+  use decompMod      , only : get_elmlevel_gsize,get_elmlevel_gsmap
   use perf_mod       , only : t_startf, t_stopf
   use fileutils      , only : getavu, relavu
   use pio            , only : file_desc_t, io_desc_t, iosystem_desc_t
@@ -43,10 +44,8 @@ module ncdio_pio
   ! !PUBLIC MEMBER FUNCTIONS:
   !
   public :: check_var          ! determine if variable is on netcdf file
-  public :: check_dim          ! determine if dimension is on netcdf file
-  public :: check_var_or_dim   ! determine if variable or dimension is on netcdf file
   public :: check_att          ! check if attribute is on file
-  public :: check_dim_size     ! validity check on dimension
+  public :: check_dim          ! validity check on dimension
   public :: ncd_pio_openfile   ! open a file
   public :: ncd_pio_createfile ! create a new file
   public :: ncd_pio_closefile  ! close a file
@@ -114,7 +113,7 @@ module ncdio_pio
      !DIMS 0,1
      module procedure ncd_io_{DIMS}d_log_glob
 
-     !DIMS 0,1,2,3
+     !DIMS 0,1,2,3,4
      !TYPE int,double
      module procedure ncd_io_{DIMS}d_{TYPE}_glob
 
@@ -123,7 +122,7 @@ module ncdio_pio
      module procedure ncd_io_{DIMS}d_{TYPE}_glob
 
      !TYPE int,double
-     !DIMS 1,2,3
+     !DIMS 1,2,3,4
      module procedure ncd_io_{DIMS}d_{TYPE}
 
      !TYPE logical
@@ -143,7 +142,7 @@ module ncdio_pio
 
   interface read_darray_dispatcher
      !TYPE int,double,logical
-     !DIMS 1,2,3
+     !DIMS 1,2,3,4
      module procedure read_darray_{TYPE}_dispatcher_{DIMS}
   end interface read_darray_dispatcher
 
@@ -164,8 +163,10 @@ module ncdio_pio
      type(IO_desc_t)   :: iodesc
      integer           :: type
      integer           :: ndims
+!h!     integer           :: dims(5)
+!h!     integer           :: dimids(5) 
      integer           :: dims(4)
-     integer           :: dimids(4)
+     integer           :: dimids(4) 
   end type iodesc_plus_type
   integer,parameter      ,private :: max_iodesc = 100
   integer                ,private :: num_iodesc = 0
@@ -185,7 +186,7 @@ contains
     !
     ! !USES:
     use shr_pio_mod     , only : shr_pio_getiosys, shr_pio_getiotype, shr_pio_getioformat
-    use clm_varctl      , only : inst_name
+    use elm_varctl      , only : inst_name
     !-----------------------------------------------------------------------
 
     PIO_subsystem => shr_pio_getiosys(inst_name)
@@ -233,7 +234,7 @@ contains
   end subroutine ncd_pio_closefile
 
   !-----------------------------------------------------------------------
-  subroutine ncd_pio_createfile(file, fname)
+  subroutine ncd_pio_createfile(file, fname, avoid_pnetcdf)
     !
     ! !DESCRIPTION:
     ! Create a new NetCDF file with PIO
@@ -245,6 +246,7 @@ contains
     class(file_desc_t), intent(inout) :: file    ! PIO file descriptor
     character(len=*) ,  intent(in)    :: fname   ! File name to create
 
+    logical, intent(in), optional     :: avoid_pnetcdf
     !
     ! !LOCAL VARIABLES:
     integer :: ierr
@@ -261,7 +263,7 @@ contains
   end subroutine ncd_pio_createfile
 
   !-----------------------------------------------------------------------
-  subroutine check_var(ncid, varname, readvar, vardesc, print_err )
+  subroutine check_var(ncid, varname, vardesc, readvar, print_err )
     !
     ! !DESCRIPTION:
     ! Check if variable is on netcdf file
@@ -270,7 +272,7 @@ contains
     class(file_desc_t) , intent(inout)          :: ncid    ! PIO file descriptor
     character(len=*)   , intent(in)             :: varname ! Varible name to check
     logical            , intent(out)            :: readvar ! If variable exists or not
-    type(Var_desc_t)   , optional, intent(out)  :: vardesc ! Output variable descriptor (if desired)
+    type(Var_desc_t)   , optional, intent(out)  :: vardesc ! Output variable descriptor
     logical            , optional, intent(in)   :: print_err ! If should print about error
     !
     ! !LOCAL VARIABLES:
@@ -300,52 +302,6 @@ contains
     call pio_seterrorhandling(ncid, PIO_INTERNAL_ERROR)
 
   end subroutine check_var
-
-  !-----------------------------------------------------------------------
-  subroutine check_dim(ncid, dimname, dimexist)
-    !
-    ! !DESCRIPTION:
-    ! Check if dimension is on netcdf file
-    !
-    ! !ARGUMENTS:
-    class(file_desc_t) , intent(inout) :: ncid     ! PIO file descriptor
-    character(len=*)   , intent(in)    :: dimname  ! dimension name
-    logical            , intent(out)   :: dimexist ! if this dimension exists or not
-    !
-    ! !LOCAL VARIABLES:
-    integer :: dimid
-
-    character(len=*), parameter :: subname = 'check_dim'
-    !-----------------------------------------------------------------------
-
-    call ncd_inqdid(ncid, dimname, dimid, dimexist)
-
-  end subroutine check_dim
-
-  !-----------------------------------------------------------------------
-  subroutine check_var_or_dim(ncid, name, is_dim, exists)
-    !
-    ! !DESCRIPTION:
-    ! Check if variable or dimension is on netcdf file
-    !
-    ! !ARGUMENTS:
-    class(file_desc_t) , intent(inout) :: ncid   ! PIO file descriptor
-    character(len=*)   , intent(in)    :: name   ! variable or dimension name to check
-    logical            , intent(in)    :: is_dim ! if true, check for dimension; if false, check for variable
-    logical            , intent(out)   :: exists ! whether the given variable or dimension exists on file
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'check_var_or_dim'
-    !-----------------------------------------------------------------------
-
-    if (is_dim) then
-       call check_dim(ncid, name, exists)
-    else
-       call check_var(ncid, name, exists, print_err=.false.)
-    end if
-
-  end subroutine check_var_or_dim
 
   !-----------------------------------------------------------------------
   subroutine check_att(ncid, varid, attrib, att_found)
@@ -380,7 +336,7 @@ contains
   end subroutine check_att
 
   !-----------------------------------------------------------------------
-  subroutine check_dim_size(ncid, dimname, value, msg)
+  subroutine check_dim(ncid, dimname, value)
     !
     ! !DESCRIPTION:
     ! Validity check on dimension
@@ -389,13 +345,11 @@ contains
     class(file_desc_t),intent(in) :: ncid      ! PIO file handle
     character(len=*) , intent(in) :: dimname   ! Dimension name
     integer, intent(in)           :: value     ! Expected dimension size
-
-    character(len=*), intent(in), optional :: msg  ! Optional additional message printed upon error
     !
     ! !LOCAL VARIABLES:
     integer :: dimid, dimlen    ! temporaries
     integer :: status           ! error code
-    character(len=*),parameter :: subname='check_dim_size' ! subroutine name
+    character(len=*),parameter :: subname='check_dim' ! subroutine name
     !-----------------------------------------------------------------------
 
     status = pio_inq_dimid (ncid, trim(dimname), dimid)
@@ -403,13 +357,10 @@ contains
     if (dimlen /= value) then
        write(iulog,*) subname//' ERROR: mismatch of input dimension ',dimlen, &
             ' with expected value ',value,' for variable ',trim(dimname)
-       if (present(msg)) then
-          write(iulog,'(a)') msg
-       end if
        call shr_sys_abort(errMsg(sourcefile, __LINE__))
     end if
 
-  end subroutine check_dim_size
+  end subroutine check_dim
 
   !-----------------------------------------------------------------------
   subroutine ncd_redef(ncid)
@@ -487,6 +438,7 @@ contains
     ! If 'name' is absent, then 'dimid' is used as an input: the dimension id to inquire.
     ! If 'name' is present, then it gives the name of the dimension to inquire, and
     ! 'dimid' is set to the ID associated with this dimension.
+!hh!    ! enddef netcdf file
     !
     ! !ARGUMENTS:
     class(file_desc_t), intent(inout) :: ncid       ! netcdf file id
@@ -786,7 +738,7 @@ contains
     integer, parameter :: error_variable_not_found = 11
     !-----------------------------------------------------------------------
 
-    call check_var(ncid, varname, readvar, vardesc=vardesc)
+    call check_var(ncid, varname, vardesc, readvar)
     if (readvar) then
        call ncd_inqvdlen_byDesc(ncid, vardesc, dimnum, dlen, err_code)
     else
@@ -875,7 +827,7 @@ contains
     character(len=*), parameter :: subname = 'ncd_inqvdname_byName'
     !-----------------------------------------------------------------------
 
-    call check_var(ncid, varname, readvar, vardesc=vardesc)
+    call check_var(ncid, varname, vardesc, readvar)
     if (readvar) then
        call ncd_inqvdname_byDesc(ncid, vardesc, dimnum, dname, err_code)
     else
@@ -1068,7 +1020,7 @@ contains
 
   !-----------------------------------------------------------------------
   subroutine ncd_defvar_bynf(ncid, varname, xtype, ndims, dimid, varid, &
-       long_name, units, cell_method, missing_value, fill_value, &
+       long_name, standard_name, units, cell_method, missing_value, fill_value, &
        imissing_value, ifill_value, comment, flag_meanings, &
        flag_values, nvalid_range )
     !
@@ -1083,6 +1035,7 @@ contains
     integer            , intent(inout) :: varid                 ! returned var id
     integer            , intent(in), optional :: dimid(:)       ! dimids
     character(len=*)   , intent(in), optional :: long_name      ! attribute
+    character(len=*)   , intent(in), optional :: standard_name  ! attribute
     character(len=*)   , intent(in), optional :: units          ! attribute
     character(len=*)   , intent(in), optional :: cell_method    ! attribute
     character(len=*)   , intent(in), optional :: comment        ! attribute
@@ -1147,6 +1100,11 @@ contains
     if (present(long_name)) then
        call ncd_putatt(ncid, varid, 'long_name', trim(long_name))
     end if
+    if (present(standard_name)) then
+       if (standard_name /= ' ') then
+          call ncd_putatt(ncid, varid, 'standard_name', trim(standard_name))
+       end if
+    end if
     if (present(flag_values)) then
        status = PIO_put_att(ncid,varid,'flag_values',flag_values)
        if ( .not. present(flag_meanings)) then
@@ -1209,10 +1167,9 @@ contains
   !-----------------------------------------------------------------------
   subroutine ncd_defvar_bygrid(ncid, varname, xtype, &
        dim1name, dim2name, dim3name, dim4name, dim5name, &
-       long_name, units, cell_method, missing_value, fill_value, &
+       long_name, standard_name, units, cell_method, missing_value, fill_value, &
        imissing_value, ifill_value, switchdim, comment, &
-       flag_meanings, flag_values, nvalid_range, &
-       varid)
+       flag_meanings, flag_values, nvalid_range )
     !
     ! !DESCRIPTION:
     !  Define a netcdf variable
@@ -1227,6 +1184,7 @@ contains
     character(len=*)   , intent(in), optional :: dim4name       ! dimension name
     character(len=*)   , intent(in), optional :: dim5name       ! dimension name
     character(len=*)   , intent(in), optional :: long_name      ! attribute
+    character(len=*)   , intent(in), optional :: standard_name  ! attribute
     character(len=*)   , intent(in), optional :: units          ! attribute
     character(len=*)   , intent(in), optional :: cell_method    ! attribute
     character(len=*)   , intent(in), optional :: comment        ! attribute
@@ -1238,13 +1196,12 @@ contains
     logical            , intent(in), optional :: switchdim      ! true=> permute dim1 and dim2 for output
     integer            , intent(in), optional :: flag_values(:)  ! attribute for int
     integer            , intent(in), optional :: nvalid_range(2)  ! attribute for int
-    integer            , intent(out), optional :: varid           ! returned var id
     !
     ! !LOCAL VARIABLES:
     integer :: n              ! indices
     integer :: ndims          ! dimension counter
     integer :: dimid(5)       ! dimension ids
-    integer :: l_varid        ! local variable id
+    integer :: varid          ! variable id
     integer :: itmp           ! temporary
     character(len=256) :: str ! temporary
     character(len=*),parameter :: subname='ncd_defvar_bygrid' ! subroutine name
@@ -1277,16 +1234,12 @@ contains
        end do
     end if
 
-    call ncd_defvar_bynf(ncid,varname,xtype,ndims,dimid,l_varid, &
-         long_name=long_name, units=units, cell_method=cell_method, &
+    call ncd_defvar_bynf(ncid,varname,xtype,ndims,dimid,varid, &
+         long_name=long_name, standard_name=standard_name,units=units, cell_method=cell_method, &
          missing_value=missing_value, fill_value=fill_value, &
          imissing_value=imissing_value, ifill_value=ifill_value, &
          comment=comment, flag_meanings=flag_meanings, &
          flag_values=flag_values, nvalid_range=nvalid_range )
-
-    if (present(varid)) then
-       varid = l_varid
-    end if
 
   end subroutine ncd_defvar_bygrid
 
@@ -1446,7 +1399,7 @@ contains
   end subroutine ncd_io_{DIMS}d_log_glob
 
   !------------------------------------------------------------------------
-  !DIMS 0,1,2,3
+  !DIMS 0,1,2,3,4
   !TYPE int,double
   subroutine ncd_io_{DIMS}d_{TYPE}_glob(varname, data, flag, ncid, readvar, nt, posNOTonfile)
     !
@@ -1463,6 +1416,7 @@ contains
     logical         , optional, intent(in)    :: posNOTonfile ! position is NOT on this file
     !
     ! !LOCAL VARIABLES:
+    integer           :: m
     integer           :: varid              ! netCDF variable id
     integer           :: start({DIMS}+1), count({DIMS}+1) ! output bounds
     integer           :: status             ! error code
@@ -1554,11 +1508,22 @@ contains
        else
           status = pio_put_var(ncid, varid, data)
        end if
+#elif ({DIMS}==4) 
+       if (present(nt)) then
+          start(1) = 1  ; count(1) = size(data,dim=1)
+          start(2) = 1  ; count(2) = size(data,dim=2)
+          start(3) = 1  ; count(3) = size(data,dim=3)
+          start(4) = 1  ; count(4) = size(data,dim=4)
+          start(5) = nt ; count(5) = 1
+          status = pio_put_var(ncid, varid, start(1:ndims), count(1:ndims), data)
+       else
+          status = pio_put_var(ncid, varid, data)
+       end if
 #endif
 
-    endif   ! flag
+    endif
 
-  end subroutine ncd_io_{DIMS}d_{TYPE}_glob
+end subroutine ncd_io_{DIMS}d_{TYPE}_glob
 
   !------------------------------------------------------------------------
   !DIMS 0,1,2
@@ -1664,7 +1629,7 @@ contains
     logical          , optional, intent(in)  :: cnvrtnan2fill ! true => convert any NaN's to _FillValue (spval)
     !
     ! Local Variables
-    character(len=8)                 :: subgrid_level_name   ! nameg, namel, etc.
+    character(len=8)                 :: elmlevel_name   ! elmlevel
     character(len=32)                :: dimname    ! temporary
     integer                          :: n          ! index
     integer                          :: iodnum     ! iodesc num in list
@@ -1679,6 +1644,7 @@ contains
     logical                          :: varpresent ! if true, variable is on tape
     integer                          :: xtype      ! type of var in file
     integer                , pointer :: idata(:)   ! Temporary integer data to send to file
+    integer                , pointer :: compDOF(:)
     type(iodesc_plus_type) , pointer :: iodesc_plus
     type(var_desc_t)                 :: vardesc
     integer                          :: oldhandle  ! previous value of pio_error_handle
@@ -1688,10 +1654,10 @@ contains
     start(:) = 0
     count(:) = 0
 
-    subgrid_level_name = dim1name
+    elmlevel_name = dim1name
 
     if (masterproc .and. debug > 1) then
-       write(iulog,*) subname//' ',trim(flag),' ',trim(varname),' ',trim(subgrid_level_name)
+       write(iulog,*) subname//' ',trim(flag),' ',trim(varname),' ',trim(elmlevel_name)
     end if
 
 #if ({ITYPE}==TYPEDOUBLE)
@@ -1709,8 +1675,8 @@ contains
        if (varpresent) then
           if (single_column) then
              start(:) = 1 ; count(:) = 1
-             call scam_field_offsets(ncid,subgrid_level_name,vardesc,start,count)
-             if (trim(subgrid_level_name) == grlnd) then
+             call scam_field_offsets(ncid,elmlevel_name,vardesc,start,count)
+             if (trim(elmlevel_name) == grlnd) then
                 n=2
                 if (present(nt)) then
                    start(3) = nt ; count(3) = 1
@@ -1755,12 +1721,12 @@ contains
              enddo
              status = pio_inq_vartype(ncid, vardesc, xtype)
 
-             call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+             call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
                   xtype, iodnum)
 
              iodesc_plus => iodesc_list(iodnum)
              if (present(nt)) then
-                call pio_setframe(ncid, vardesc, int(nt,kind=Pio_Offset_Kind))
+                call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
              end if
              call read_darray_dispatcher(ncid, vardesc, iodesc_plus%iodesc, varname, xtype, data)
 
@@ -1784,11 +1750,11 @@ contains
           status = pio_inq_dimlen(ncid,dids(n),dims(n))
        enddo
        status = pio_inq_vartype(ncid, vardesc, xtype)
-       call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+       call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
             xtype, iodnum)
        iodesc_plus => iodesc_list(iodnum)
        if (present(nt)) then
-          call pio_setframe(ncid, vardesc, int(nt,kind=Pio_Offset_Kind))
+          call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
        end if
 #if ({ITYPE}==TYPELOGICAL)
        allocate( idata(size(data)) )
@@ -1847,7 +1813,7 @@ contains
     real(r8), pointer :: temp(:,:)
 #endif
     integer           :: ndim1,ndim2
-    character(len=8)  :: subgrid_level_name   ! nameg, namel, etc.
+    character(len=8)  :: elmlevel_name   ! elmlevel
     character(len=32) :: dimname    ! temporary
     integer           :: status     ! error status
     integer           :: ndims      ! ndims total for var
@@ -1872,10 +1838,10 @@ contains
     start(:)=0
     count(:)=0
 
-    subgrid_level_name = dim1name
+    elmlevel_name = dim1name      
 
     if (masterproc .and. debug > 1) then
-       write(iulog,*) trim(subname),' ',trim(flag),' ',trim(varname),' ',trim(subgrid_level_name)
+       write(iulog,*) trim(subname),' ',trim(flag),' ',trim(varname),' ',trim(elmlevel_name)
     end if
 
 #if ({ITYPE}==TYPEDOUBLE)
@@ -1904,8 +1870,8 @@ contains
        if (varpresent) then
           if (single_column) then
              start(:) = 1 ; count(:) = 1
-             call scam_field_offsets(ncid, subgrid_level_name, vardesc, start, count)
-             if (trim(subgrid_level_name) == grlnd) then
+             call scam_field_offsets(ncid, elmlevel_name, vardesc, start, count)
+             if (trim(elmlevel_name) == grlnd) then
                 count(3) = size(data,dim=2)
                 n=3
                 if (present(nt)) then
@@ -1948,10 +1914,10 @@ contains
              enddo
              status = pio_inq_vartype(ncid, vardesc, xtype)
              if (present(nt)) then
-                call pio_setframe(ncid, vardesc, int(nt,kind=Pio_Offset_Kind))
+                call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
              end if
              if (present(switchdim)) then
-                call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+                call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
                      xtype, iodnum, switchdim=.true.)
                 iodesc_plus => iodesc_list(iodnum)
                 call read_darray_dispatcher(ncid, vardesc, iodesc_plus%iodesc, varname, xtype, temp)
@@ -1961,7 +1927,7 @@ contains
                    end do
                 end do
              else
-                call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+                call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
                      xtype, iodnum)
                 iodesc_plus => iodesc_list(iodnum)
                 call read_darray_dispatcher(ncid, vardesc, iodesc_plus%iodesc, varname, xtype, data)
@@ -2002,15 +1968,15 @@ contains
        enddo
        status = pio_inq_vartype(ncid, vardesc, xtype)
        if (present(switchdim)) then
-          call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+          call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
                xtype, iodnum, switchdim=.true.)
        else
-          call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+          call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
                xtype, iodnum)
        end if
        iodesc_plus => iodesc_list(iodnum)
        if (present(nt)) then
-          call pio_setframe(ncid, vardesc, int(nt,kind=Pio_Offset_Kind))
+          call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
        end if
        if (present(switchdim)) then
           do j = lb2,ub2
@@ -2083,7 +2049,7 @@ contains
     !
     ! !LOCAL VARIABLES:
     integer                          :: ndim1,ndim2
-    character(len=8)                 :: subgrid_level_name   ! nameg, namel, etc.
+    character(len=8)                 :: elmlevel_name   ! elmlevel
     character(len=32)                :: dimname    ! temporary
     integer                          :: status     ! error status
     integer                          :: ndims      ! ndims total for var
@@ -2102,10 +2068,10 @@ contains
     character(len=*),parameter :: subname='ncd_io_3d_{TYPE}' ! subroutine name
     !-----------------------------------------------------------------------
 
-    subgrid_level_name = dim1name
+    elmlevel_name = dim1name 
 
     if (masterproc .and. debug > 1) then
-       write(iulog,*) trim(subname),' ',trim(flag),' ',trim(varname),' ',trim(subgrid_level_name)
+       write(iulog,*) trim(subname),' ',trim(flag),' ',trim(varname),' ',trim(elmlevel_name)
     end if
 
     if (flag == 'read') then
@@ -2115,8 +2081,8 @@ contains
           if (single_column) then
              start(:) = 1
              count(:) = 1
-             call scam_field_offsets(ncid, subgrid_level_name, vardesc, start, count)
-             if (trim(subgrid_level_name) == grlnd) then
+             call scam_field_offsets(ncid, elmlevel_name, vardesc, start, count)
+             if (trim(elmlevel_name) == grlnd) then
                 count(3) = size(data,dim=2);
                 count(4) = size(data,dim=3)
                 n=4
@@ -2153,11 +2119,11 @@ contains
                 status = pio_inq_dimlen(ncid,dids(n),dims(n))
              enddo
              status = pio_inq_vartype(ncid, vardesc, xtype)
-             call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+             call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
                   xtype, iodnum)
              iodesc_plus => iodesc_list(iodnum)
              if (present(nt)) then
-                call pio_setframe(ncid, vardesc, int(nt,kind=Pio_Offset_Kind))
+                call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
              end if
              call read_darray_dispatcher(ncid, vardesc, iodesc_plus%iodesc, varname, xtype, data)
 
@@ -2184,11 +2150,11 @@ contains
           status = pio_inq_dimlen(ncid,dids(n),dims(n))
        enddo
        status = pio_inq_vartype(ncid, vardesc, xtype)
-       call ncd_getiodesc(ncid, subgrid_level_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+       call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
             xtype, iodnum)
        iodesc_plus => iodesc_list(iodnum)
        if (present(nt)) then
-          call pio_setframe(ncid, vardesc, int(nt,kind=Pio_Offset_Kind))
+          call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
        end if
        call pio_write_darray(ncid, vardesc, iodesc_plus%iodesc, data, status)
 
@@ -2204,8 +2170,149 @@ contains
   end subroutine ncd_io_3d_{TYPE}
 
   !-----------------------------------------------------------------------
+  !TYPE int,double
+  subroutine ncd_io_4d_{TYPE}(varname, data, dim1name, flag, ncid, nt, readvar)
+    !
+    ! !DESCRIPTION:
+    ! Netcdf i/o of 4d 
+    !
+    ! !ARGUMENTS:
+    class(file_desc_t), intent(inout) :: ncid         ! netcdf file id
+    character(len=*) , intent(in)  :: flag            ! 'read' or 'write'
+    character(len=*) , intent(in)  :: varname         ! variable name
+    {VTYPE}          , pointer     :: data(:,:,:,:)     ! local decomposition input data
+    character(len=*) , intent(in)  :: dim1name        ! dimension 1 name
+    integer, optional, intent(in)  :: nt              ! time sample index
+    logical, optional, intent(out) :: readvar         ! true => variable is on initial dataset (read only)
+    !
+    ! !LOCAL VARIABLES:
+    integer                          :: ndim1,ndim2       
+    character(len=8)                 :: elmlevel_name   ! elmlevel
+    character(len=32)                :: dimname    ! temporary      
+    integer                          :: status     ! error status
+    integer                          :: ndims      ! ndims total for var
+    integer                          :: ndims_iod  ! ndims iodesc for var
+    integer                          :: varid      ! varid
+    integer                          :: n          ! index      
+    integer                          :: dims(5)    ! dim sizes       
+    integer                          :: dids(5)    ! dim ids
+    integer                          :: iodnum     ! iodesc num in list
+    integer                          :: start(6)   ! netcdf start index
+    integer                          :: count(6)   ! netcdf count index
+    integer                          :: xtype      ! netcdf type of variable on file
+    logical                          :: varpresent ! if true, variable is on tape
+    type(iodesc_plus_type) , pointer :: iodesc_plus
+    type(var_desc_t)                 :: vardesc
+    character(len=*),parameter :: subname='ncd_io_4d_{TYPE}' ! subroutine name
+    !-----------------------------------------------------------------------
+
+    elmlevel_name = dim1name      
+
+    if (masterproc .and. debug > 1) then
+       write(iulog,*) trim(subname),' ',trim(flag),' ',trim(varname),' ',trim(elmlevel_name)
+    end if
+
+    if (flag == 'read') then
+
+       call ncd_inqvid(ncid, varname, varid, vardesc, readvar=varpresent)
+       if (varpresent) then
+          if (single_column) then
+             start(:) = 1
+             count(:) = 1
+             call scam_field_offsets(ncid, elmlevel_name, vardesc, start, count)
+             if (trim(elmlevel_name) == grlnd) then
+                count(3) = size(data,dim=2);
+                count(4) = size(data,dim=3)
+                count(5) = size(data,dim=4)
+                n=5
+                if (present(nt)) then
+                   start(6) = nt
+                   count(6) = 1
+                   n=6
+                end if
+             else
+                count(2) = size(data,dim=2)
+                count(3) = size(data,dim=3)
+                count(4) = size(data,dim=4)
+                n=4
+                if (present(nt)) then
+                   start(5) = nt
+                   count(5) = 1
+                   n=5
+                end if
+             end if
+             status = pio_get_var(ncid, vardesc, start(1:n), count(1:n), data)
+          else
+             status = pio_inq_varndims(ncid, vardesc, ndims)
+             status = pio_inq_vardimid(ncid,vardesc, dids(1:ndims))
+             status = pio_inq_dimname(ncid, dids(ndims), dimname)
+             if (ndims == 0) then
+                write(iulog,*) trim(subname),' ERROR: ndims must be greater than 0'
+                call shr_sys_abort(errMsg(sourcefile, __LINE__))
+             end if
+             if ('time' == trim(dimname)) then
+                ndims_iod = ndims - 1
+             else
+                ndims_iod = ndims
+             end if
+             do n = 1,ndims_iod
+                status = pio_inq_dimlen(ncid,dids(n),dims(n))
+             enddo
+             status = pio_inq_vartype(ncid, vardesc, xtype)
+             call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+                  xtype, iodnum)
+             iodesc_plus => iodesc_list(iodnum)
+             if (present(nt)) then
+                call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
+             end if
+             call read_darray_dispatcher(ncid, vardesc, iodesc_plus%iodesc, varname, xtype, data)
+
+          end if
+       end if
+       if (present(readvar)) readvar = varpresent
+
+    else if (flag == 'write') then
+
+       call ncd_inqvid(ncid, varname ,varid, vardesc)
+       status = pio_inq_varndims(ncid, vardesc, ndims)
+       status = pio_inq_vardimid(ncid, vardesc , dids(1:ndims))
+       if (ndims == 0) then
+          write(iulog,*) trim(subname),' ERROR: ndims must be greater than 0'
+          call shr_sys_abort(errMsg(sourcefile, __LINE__))
+       end if
+       status = pio_inq_dimname(ncid,dids(ndims),dimname)
+       if ('time' == trim(dimname)) then
+          ndims_iod = ndims - 1
+       else
+          ndims_iod = ndims
+       end if
+       do n = 1,ndims_iod
+          status = pio_inq_dimlen(ncid,dids(n),dims(n))
+       enddo
+       status = pio_inq_vartype(ncid, vardesc, xtype)
+       call ncd_getiodesc(ncid, elmlevel_name, ndims_iod, dims(1:ndims_iod), dids(1:ndims_iod), &
+            xtype, iodnum)
+       iodesc_plus => iodesc_list(iodnum)
+       if (present(nt)) then
+          call pio_setframe(ncid, vardesc, int(nt,kind=pio_offset_kind))
+       end if
+       call pio_write_darray(ncid, vardesc, iodesc_plus%iodesc, data, status)
+
+    else
+
+       if (masterproc) then
+          write(iulog,*) subname,' error: unsupported flag ',trim(flag)
+          call shr_sys_abort(errMsg(sourcefile, __LINE__))
+       endif
+
+    endif
+
+  end subroutine ncd_io_4d_{TYPE}
+
+
+  !-----------------------------------------------------------------------
   !TYPE int,double,logical
-  !DIMS 1,2,3
+  !DIMS 1,2,3,4
   subroutine read_darray_{TYPE}_dispatcher_{DIMS}(ncid, vardesc, iodesc, varname, xtype, data)
     !
     ! !DESCRIPTION:
@@ -2241,7 +2348,7 @@ contains
 
   !------------------------------------------------------------------------
   !TYPE int,double,logical
-  !DIMS 1,2,3
+  !DIMS 1,2,3,4
   subroutine read_darray_{TYPE}_from_double_{DIMS}(ncid, vardesc, iodesc, varname, data)
     class(file_desc_t), intent(inout) :: ncid
     type(var_desc_t), intent(inout) :: vardesc
@@ -2281,7 +2388,7 @@ contains
 
   !------------------------------------------------------------------------
   !TYPE int,double,logical
-  !DIMS 1,2,3
+  !DIMS 1,2,3,4
   subroutine read_darray_{TYPE}_from_int_{DIMS}(ncid, vardesc, iodesc, varname, data)
     class(file_desc_t), intent(inout) :: ncid
     type(var_desc_t), intent(inout) :: vardesc
@@ -2321,7 +2428,7 @@ contains
 
   !------------------------------------------------------------------------
   !TYPE int,double,logical
-  !DIMS 1,2,3
+  !DIMS 1,2,3,4
   subroutine read_darray_{TYPE}_from_real_{DIMS}(ncid, vardesc, iodesc, varname, data)
     class(file_desc_t), intent(inout) :: ncid
     type(var_desc_t), intent(inout) :: vardesc
@@ -2364,7 +2471,7 @@ contains
     ! Read/Write initial data from/to netCDF instantaneous initial data file
     !
     ! !USES:
-    use clm_varctl,     only: scmlon,scmlat,single_column
+    use elm_varctl,     only: scmlon,scmlat,single_column
     use shr_scam_mod,   only: shr_scam_getCloseLatLon
     use shr_string_mod, only: shr_string_toLower
     !
@@ -2388,9 +2495,12 @@ contains
     real(r8) , pointer   :: pfts1dlat(:)      ! holds pfts1d_jxy var
     real(r8) , pointer   :: land1dlon(:)      ! holds land1d_ixy var
     real(r8) , pointer   :: land1dlat(:)      ! holds land1d_jxy var
+    real(r8) , pointer   :: topo1dlon(:)      ! holds topo1d_ixy var
+    real(r8) , pointer   :: topo1dlat(:)      ! holds topo1d_ixy var
     integer, allocatable :: cols(:)           ! grid cell columns for scam
     integer, allocatable :: pfts(:)           ! grid cell pfts for scam
     integer, allocatable :: landunits(:)      ! grid cell landunits for scam
+    integer, allocatable :: topounits(:)      ! grid cell topounits for scam
     integer, allocatable :: dids(:)           ! dim ids
     integer              :: varid             ! netCDF variable id
     integer              :: status            ! return code
@@ -2435,7 +2545,7 @@ contains
        if ( trim(dimname)=='nj'.or. trim(dimname)=='lat'.or. trim(dimname)=='lsmlat') then
           start(i)=latidx
           count(i)=1
-       else if ( trim(dimname)=='ni'.or. trim(dimname)=='lon'.or. trim(dimname)=='lsmlon') then
+       else if ( trim(dimname)=='ni'.or. trim(dimname)=='lon'.or. trim(dimname)=='lsmlon' .or. trim(dimname)=='gridcell') then
           start(i)=lonidx
           count(i)=1
        else if ( trim(dimname)=='column') then
@@ -2545,6 +2655,42 @@ contains
 
           start(i) = data_offset
           count(i) = ndata
+       else if ( trim(dimname)=='topounit') then
+
+          allocate (topo1dlon(dimlen))
+          allocate (topo1dlat(dimlen))
+          allocate (topounits(dimlen))
+
+          status = pio_inq_varid(ncid, 'topo1d_lon', varid)
+          status = pio_get_var(ncid, varid, topo1dlon)
+
+          status = pio_inq_varid(ncid, 'topo1d_lat', varid)
+          status = pio_get_var(ncid, varid, topo1dlat)
+
+          topounits(:) = huge(1)
+          data_offset  = huge(1)
+          ii     = 1
+          ndata = 0
+          do cc = 1, dimlen
+             if (topo1dlon(cc) == closelon.and.topo1dlat(cc) == closelat) then
+                topounits(ii)=cc
+                ndata  =ii
+                ii=ii+1
+             end if
+          end do
+          if (ndata == 0) then
+             write(iulog,*)'couldnt find any topounits for this latitude',closelat,' and longitude ',closelon
+             call shr_sys_abort('ERROR:: no topounits for this position'//errMsg(sourcefile, __LINE__))
+          else
+             data_offset=topounits(1)
+          end if
+
+          deallocate (topo1dlon)
+          deallocate (topo1dlat)
+          deallocate (topounits)
+
+          start(i) = data_offset
+          count(i) = ndata
        else
           start(i)=1
           count(i)=dimlen
@@ -2556,7 +2702,7 @@ contains
 
   !------------------------------------------------------------------------
 
-  subroutine ncd_getiodesc(ncid, subgrid_level_name, ndims, dims, dimids, &
+  subroutine ncd_getiodesc(ncid, elmlevel_name, ndims, dims, dimids, &
        xtype, iodnum, switchdim)
     !
     ! !DESCRIPTION:
@@ -2564,8 +2710,8 @@ contains
     !
     ! !ARGUMENTS:
     class(file_desc_t) , intent(inout) :: ncid       ! PIO file descriptor
-    character(len=8)   , intent(in)    :: subgrid_level_name ! one of nameg, namel, etc.
-    integer            , intent(in)    :: ndims      ! ndims for var
+    character(len=8)   , intent(in)    :: elmlevel_name   ! elmlevel
+    integer            , intent(in)    :: ndims      ! ndims for var      
     integer            , intent(in)    :: dims(:)    ! dim sizes
     integer            , intent(in)    :: dimids(:)  ! dim ids
     integer            , intent(in)    :: xtype      ! file external type
@@ -2576,17 +2722,16 @@ contains
     integer :: k,m,n,cnt                     ! indices
     integer :: basetype                      ! pio basetype
     integer :: fullsize                      ! size of entire array on cdf
-    integer :: subgrid_level                 ! integer version of subgrid_level_name
-    integer :: lsize                         ! local size of subgrid_level gindex
-    integer :: gsize                         ! global size of subgrid_level
+    integer :: lsize                     ! local size of gsmap
+    integer :: gsize                   ! global size of gsmap
     integer :: vsize                         ! other dimensions
     integer :: vsize1, vsize2                ! other dimensions
     integer :: status                        ! error status
     logical :: found                         ! true => found created iodescriptor
     integer :: ndims_file                    ! temporary
-    character(len=64) :: dimname_file        ! dimension name on file
-    character(len=64) :: dimname_iodesc      ! dimension name from io descriptor
-    integer, pointer  :: gindex(:)           ! global index space
+    character(len=64) :: dimname_file             ! dimension name on file
+    character(len=64) :: dimname_iodesc           ! dimension name from io descriptor
+    integer, pointer  :: gsmap(:)              ! global index space
     integer(pio_offset_kind), pointer  :: compDOF(:)
     character(len=32) :: subname = 'ncd_getiodesc'
     !------------------------------------------------------------------------
@@ -2660,13 +2805,12 @@ contains
        call shr_sys_abort(errMsg(sourcefile,__LINE__))
     end if
 
-    subgrid_level = get_subgrid_level_from_name(subgrid_level_name)
-    call get_subgrid_level_gindex(subgrid_level, gindex)
-    if (.not. associated(gindex)) then
-       call shr_sys_abort('gindex for subgrid level '//trim(subgrid_level_name)//' is not associated')
+    call get_elmlevel_gsmap(elmlevel_name, gsmap)
+    if (.not. associated(gsmap)) then
+       call shr_sys_abort('gsmap for subgrid level '//trim(elmlevel_name)//' is not associated')
     end if
-    gsize = get_subgrid_level_gsize(subgrid_level)
-    lsize = size(gindex)
+    gsize = get_elmlevel_gsize(elmlevel_name)
+    lsize = size(gsmap)
 
     fullsize = 1
     do n = 1,ndims
@@ -2675,7 +2819,7 @@ contains
 
     vsize = fullsize / gsize
     if (mod(fullsize,gsize) /= 0) then
-       write(iulog,*) subname,' ERROR in vsize ',fullsize,gsize,vsize
+       write(iulog,*) subname,' ERROR in vsize ',fullsize,gsize,vsize,ndims,dims
        call shr_sys_abort(errMsg(sourcefile, __LINE__))
     endif
 
@@ -2687,7 +2831,7 @@ contains
           do m = 1,lsize
              do n = 1,vsize
                 cnt = cnt + 1
-                compDOF(cnt) = (gindex(m)-1)*vsize + n
+                compDOF(cnt) = (gsmap(m)-1)*vsize + n
              enddo
           enddo
        else
@@ -2707,7 +2851,7 @@ contains
              do n = 1,vsize1
                 do m = 1,lsize
                    cnt = cnt + 1
-                   compDOF(cnt) = (k-1)*vsize1*gsize + (n-1)*gsize + gindex(m)
+                   compDOF(cnt) = (k-1)*vsize1*gsize + (n-1)*gsize + gsmap(m) 
                 enddo
              enddo
           end do
@@ -2716,7 +2860,7 @@ contains
           do n = 1,vsize
              do m = 1,lsize
                 cnt = cnt + 1
-                compDOF(cnt) = (n-1)*gsize + gindex(m)
+                compDOF(cnt) = (n-1)*gsize + gsmap(m)
              enddo
           enddo
        end if
@@ -2725,9 +2869,9 @@ contains
     if (debug > 1) then
        do m = 0,npes-1
           if (iam == m) then
-             write(iulog,'(a,3(i10,2x))') trim(subname)//' sizes1  = ',iam,gsize,lsize
-             write(iulog,'(a,4(i10,2x))') trim(subname)//' sizes2  = ',iam,fullsize,npes,vsize
-             write(iulog,'(a,5(i10,2x))') trim(subname)//' compDOF = ',iam,size(compDOF),minval(compDOF),maxval(compDOF)
+             write(iulog,*) trim(subname),' sizes1  = ',iam,gsize,gsize,lsize
+             write(iulog,*) trim(subname),' sizes2  = ',iam,fullsize,npes,vsize
+             write(iulog,*) trim(subname),' compDOF = ',iam,size(compDOF),minval(compDOF),maxval(compDOF)
              call shr_sys_flush(iulog)
           endif
           call mpi_barrier(mpicom,status)

@@ -12,7 +12,7 @@ set(CLM_ROOT "..")
 # This definition is needed to avoid having ESMF depend on mpi
 add_definitions(-DHIDE_MPI)
 
-# Add source directories from other share code (csm_share, etc.). This should be
+# Add source directories from other models (csm_share, etc.). This should be
 # done first, so that in case of name collisions, the CLM versions take
 # precedence (when there are two files with the same name, the one added later
 # wins).
@@ -30,19 +30,22 @@ extract_sources("${drv_sources_needed_base}" "${drv_sources}" drv_sources_needed
 # Add CLM source directories (these add their own test directories)
 add_subdirectory(${CLM_ROOT}/src/utils clm_utils)
 add_subdirectory(${CLM_ROOT}/src/biogeochem clm_biogeochem)
-add_subdirectory(${CLM_ROOT}/src/soilbiogeochem clm_soilbiogeochem)
 add_subdirectory(${CLM_ROOT}/src/biogeophys clm_biogeophys)
 add_subdirectory(${CLM_ROOT}/src/dyn_subgrid clm_dyn_subgrid)
 add_subdirectory(${CLM_ROOT}/src/main clm_main)
-add_subdirectory(${CLM_ROOT}/src/init_interp clm_init_interp)
-add_subdirectory(${CLM_ROOT}/src/self_tests clm_self_tests)
+add_subdirectory(${CLM_ROOT}/src/external_models/fates/main ed_main)
+add_subdirectory(${CLM_ROOT}/src/external_models/fates/biogeophys ed_biogeophys)
+add_subdirectory(${CLM_ROOT}/src/external_models/fates/biogeochem ed_biogeochem)
+add_subdirectory(${CLM_ROOT}/src/external_models/fates/fire ed_fire)
 
-# Add general unit test directories (stubbed out files, etc.)
-add_subdirectory(unit_test_stubs)
+
+# Add general unit test directories (mocked out files, etc.)
+add_subdirectory(unit_test_mocks)
 add_subdirectory(unit_test_shr)
+add_subdirectory(unit_test_stubs)
 
-# Remove shr_mpi_mod from share_sources.
-# This is needed because we want to use the mock shr_mpi_mod in place of the real one
+# Remove shr_sys_mod from share_sources.
+# This is needed because we want to use the mock shr_sys_mod in place of the real one
 #
 # TODO: this should be moved into a general-purpose function in Sourcelist_utils.
 # Then this block of code could be replaced with a single call, like:
@@ -72,7 +75,7 @@ foreach (sourcefile ${share_sources})
   endif()
 endforeach()
 
-# Build libraries containing stuff needed for the unit tests.
+# Build libraries containing stuff needed for the unit tests. 
 # Eventually, these add_library calls should probably be distributed into the correct location, rather than being in this top-level CMakeLists.txt file.
 add_library(csm_share ${share_sources} ${drv_sources_needed})
 declare_generated_dependencies(csm_share "${share_genf90_sources}")
@@ -97,12 +100,6 @@ link_directories(${CMAKE_CURRENT_BINARY_DIR})
 # has tests in it. However, it appears that the order needs to be done
 # carefully: for example, include_directories and link_directories needs to be
 # done before adding the tests themselves.
-add_subdirectory(${CLM_ROOT}/src/unit_test_shr/test clm_unit_test_shr_test)
-add_subdirectory(${CLM_ROOT}/src/utils/test clm_utils_test)
 add_subdirectory(${CLM_ROOT}/src/biogeophys/test clm_biogeophys_test)
-add_subdirectory(${CLM_ROOT}/src/biogeochem/test clm_biogeochem_test)
-add_subdirectory(${CLM_ROOT}/src/soilbiogeochem/test clm_soilbiogeochem_test)
 add_subdirectory(${CLM_ROOT}/src/dyn_subgrid/test clm_dyn_subgrid_test)
 add_subdirectory(${CLM_ROOT}/src/main/test clm_main_test)
-add_subdirectory(${CLM_ROOT}/src/init_interp/test clm_init_interp_test)
-add_subdirectory(${CLM_ROOT}/src/self_tests/test clm_self_tests_test)

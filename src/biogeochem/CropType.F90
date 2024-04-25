@@ -1,13 +1,9 @@
 module CropType
-
-#include "shr_assert.h"
-
   !-----------------------------------------------------------------------
   ! !DESCRIPTION:
   ! Module containing variables needed for the crop model
   !
-  ! TODO(wjs, 2014-08-05) Move more crop-specific variables into here - many are
-  ! currently in CNVegStateType
+  ! TODO(wjs, 2014-08-05) Move more crop-specific variables into here
   !
   ! !USES:
   use shr_kind_mod        , only : r8 => shr_kind_r8
@@ -15,75 +11,76 @@ module CropType
   use spmdMod             , only : masterproc
   use abortutils          , only : endrun
   use decompMod           , only : bounds_type
-  use clm_varcon          , only : spval
-  use clm_varctl          , only : iulog, use_crop
+  use elm_varcon          , only : spval
+  use elm_varpar          , only : crop_prog
+  use elm_varctl          , only : iulog, use_crop
+  use ColumnDataType      , only : col_es
+  use VegetationDataType  , only : veg_es
   !
   ! !PUBLIC TYPES:
   implicit none
   private
+  save
   !
+
+  real(r8), public, parameter :: tcvp = 0.4_r8
+  real(r8), public, parameter :: tcvt = 0.01_r8
+  real(r8), public, parameter :: cst  = 283._r8
+
   ! !PUBLIC DATA TYPES:
   !
-
-  ! Possible values of cphase
-  real(r8), parameter, public :: cphase_not_planted = 0._r8
-  real(r8), parameter, public :: cphase_planted     = 1._r8
-  real(r8), parameter, public :: cphase_leafemerge  = 2._r8
-  real(r8), parameter, public :: cphase_grainfill   = 3._r8
-  real(r8), parameter, public :: cphase_harvest     = 4._r8
-
   ! Crop state variables structure
   type, public :: crop_type
 
+     ! Note that cropplant and harvdate could be 2D to facilitate rotation
      integer , pointer :: nyrs_crop_active_patch  (:)   ! number of years this crop patch has been active (0 for non-crop patches)
      logical , pointer :: croplive_patch          (:)   ! patch Flag, true if planted, not harvested
-     integer , pointer :: harvdate_patch          (:)   ! most recent patch harvest date; 999 if currently (or never) planted
+     logical , pointer :: cropplant_patch         (:)   ! patch Flag, true if planted
+     integer , pointer :: harvdate_patch          (:)   ! patch harvest date
      real(r8), pointer :: fertnitro_patch         (:)   ! patch fertilizer nitrogen
+
+     real(r8), pointer :: gddplant_patch          (:)   ! patch accum gdd past planting date for crop       (ddays)
      real(r8), pointer :: gddtsoi_patch           (:)   ! patch growing degree-days from planting (top two soil layers) (ddays)
+     real(r8), pointer :: crpyld_patch            (:)   ! patch crop yield (bu/acre)
+     real(r8), pointer :: dmyield_patch           (:)   ! patch crop yield (t/ha)
+
      real(r8), pointer :: vf_patch                (:)   ! patch vernalization factor for cereal
-     real(r8), pointer :: cphase_patch            (:)   ! phenology phase (see cphase_* constants above for possible values)
-     real(r8), pointer :: latbaset_patch          (:)   ! Latitude vary baset for hui (degree C)
+     real(r8), pointer :: cphase_patch            (:)   ! phenology phase
+     real(r8), pointer :: latbaset_patch          (:)   ! Latitude vary baset for gddplant (degree C)
      character(len=20) :: baset_mapping
-     real(r8) :: baset_latvary_intercept
-     real(r8) :: baset_latvary_slope
-     real(r8), pointer :: sdates_thisyr           (:,:) ! all actual sowing dates for this patch this year
-     real(r8), pointer :: hdates_thisyr           (:,:) ! all actual harvest dates for this patch this year
-     integer , pointer :: sowing_count            (:)   ! number of sowing events this year for this patch
-     integer , pointer :: harvest_count           (:)   ! number of sowing events this year for this patch
-     ! gddaccum tracks the actual growing degree-days accumulated over the growing season.
-     ! hui also accumulates growing degree-days, but can be boosted if full leafout is
-     ! achieved before the GDD threshold for grain fill has been reached; see CropPhenology().
-     real(r8), pointer :: hui_patch               (:)   ! crop patch heat unit index (ddays)
-     real(r8), pointer :: gddaccum_patch          (:)   ! patch growing degree-days from planting (air) (ddays)
+     real(r8)          :: baset_latvary_intercept
+     real(r8)          :: baset_latvary_slope
+
+     real(r8), pointer :: cvt_patch               (:)   ! patch temperture coefficient of variance
+     real(r8), pointer :: cvp_patch               (:)   ! patch precipitation coefficient of variance
+     real(r8), pointer :: plantmonth_patch        (:)   ! month of planting
+     real(r8), pointer :: plantday_patch          (:)   ! day of planting
+     real(r8), pointer :: harvday_patch           (:)   ! day of harvest
+     real(r8), pointer :: xt_patch                (:,:)   ! monthly average temperature
+     real(r8), pointer :: xp_patch                (:,:)   ! monthly average precipitation
+     real(r8), pointer :: xt_bar_patch            (:,:)   ! exponential weighted moving average temperature
+     real(r8), pointer :: xp_bar_patch            (:,:)   ! exponential weighted moving average precipitation
+     real(r8), pointer :: prev_xt_bar_patch       (:,:)   ! previous 12-months ewma temperature
+     real(r8), pointer :: prev_xp_bar_patch       (:,:)   ! previous 12-months ewma precipitation
+     real(r8), pointer :: p2ETo_patch             (:,:)   ! precipitation:evapotranspiration ratio (mm)
+     real(r8), pointer :: p2ETo_bar_patch         (:,:)   ! ewma precipitation:evapotranspiration ratio (mm)
+     real(r8), pointer :: prev_p2ETo_bar_patch    (:,:)   ! previous 12-months ewma precipitation:evapotranspiration ratio (mm)
+     real(r8), pointer :: P2E_rm_patch            (:,:)   ! precipitation:evapotranspiration ratio 4-month sum (mm)
+     real(r8), pointer :: ETo_patch               (:,:)   ! evapotranspiration ratio (mm)
 
    contains
-     ! Public routines
-     procedure, public  :: Init               ! Initialize the crop type
+     procedure, public  :: Init
      procedure, public  :: InitAccBuffer
      procedure, public  :: InitAccVars
      procedure, public  :: Restart
-     procedure, public  :: ReadNML            ! Read in the crop namelist
-
-     ! NOTE(wjs, 2014-09-29) need to rename this from UpdateAccVars to CropUpdateAccVars
-     ! to prevent cryptic error messages with pgi (v. 13.9 on yellowstone)
-     ! This is probably related to this bug
-     ! <http://www.pgroup.com/userforum/viewtopic.php?t=4285>, which was fixed in pgi 14.7.
-     procedure, public  :: CropUpdateAccVars
-
+     procedure, public  :: UpdateAccVars
      procedure, public  :: CropIncrementYear
 
-     ! Private routines
-     procedure, private :: InitAllocate
+     procedure, private :: InitAllocate 
      procedure, private :: InitHistory
-     procedure, private :: InitCold
      procedure, private, nopass :: checkDates
 
   end type crop_type
-
-  character(len=*), parameter, private :: baset_map_constant = 'constant'
-  character(len=*), parameter, private :: baset_map_latvary  = 'varytropicsbylat'
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
 
   !------------------------------------------------------------------------
 
@@ -97,101 +94,20 @@ contains
     type(bounds_type), intent(in)    :: bounds
     !
     ! !LOCAL VARIABLES:
-
+    
     character(len=*), parameter :: subname = 'Init'
     !-----------------------------------------------------------------------
-
+    
     call this%InitAllocate(bounds)
 
-    if (use_crop) then
+    if (crop_prog) then
        call this%InitHistory(bounds)
-       call this%InitCold(bounds)
     end if
 
   end subroutine Init
 
   !-----------------------------------------------------------------------
-  subroutine ReadNML(this, NLFilename )
-    !
-    ! !DESCRIPTION:
-    ! Read the namelist for CropType
-    !
-    ! !USES:
-    use fileutils      , only : getavu, relavu, opnfil
-    use shr_nl_mod     , only : shr_nl_find_group_name
-    use spmdMod        , only : masterproc, mpicom
-    use shr_mpi_mod    , only : shr_mpi_bcast
-    use clm_varctl     , only : iulog
-    !
-    ! !ARGUMENTS:
-    class(crop_type) , intent(inout) :: this
-    character(len=*), intent(in) :: NLFilename ! Namelist filename
-    !
-    ! !LOCAL VARIABLES:
-    integer :: ierr                 ! error code
-    integer :: unitn                ! unit for namelist file
-
-    character(len=*), parameter :: subname = 'Crop::ReadNML'
-    character(len=*), parameter :: nmlname = 'crop'
-    !-----------------------------------------------------------------------
-    character(len=20) :: baset_mapping
-    real(r8) :: baset_latvary_intercept
-    real(r8) :: baset_latvary_slope
-    namelist /crop/ baset_mapping, baset_latvary_intercept, baset_latvary_slope
-
-    ! Initialize options to default values, in case they are not specified in
-    ! the namelist
-
-    baset_mapping           = 'constant'
-    baset_latvary_intercept = 12._r8
-    baset_latvary_slope     = 0.4_r8
-    if (masterproc) then
-       unitn = getavu()
-       write(iulog,*) 'Read in '//nmlname//'  namelist'
-       call opnfil (NLFilename, unitn, 'F')
-       call shr_nl_find_group_name(unitn, nmlname, status=ierr)
-       if (ierr == 0) then
-          read(unitn, nml=crop, iostat=ierr)
-          if (ierr /= 0) then
-             call endrun(msg="ERROR reading "//nmlname//"namelist"//errmsg(sourcefile, __LINE__))
-          end if
-       else
-          call endrun(msg="ERROR could NOT find "//nmlname//"namelist"//errmsg(sourcefile, __LINE__))
-       end if
-       call relavu( unitn )
-    end if
-
-    call shr_mpi_bcast (baset_mapping           , mpicom)
-    call shr_mpi_bcast (baset_latvary_intercept , mpicom)
-    call shr_mpi_bcast (baset_latvary_slope     , mpicom)
-
-    this%baset_mapping           = baset_mapping
-    this%baset_latvary_intercept = baset_latvary_intercept
-    this%baset_latvary_slope     = baset_latvary_slope
-    if (      trim(this%baset_mapping) == baset_map_constant ) then
-       if ( masterproc ) write(iulog,*) 'baset mapping for ALL crops are constant'
-    else if ( trim(this%baset_mapping) == baset_map_latvary ) then
-       if ( masterproc ) write(iulog,*) 'baset mapping for crops vary with latitude'
-    else
-       call endrun(msg="Bad value for baset_mapping in "//nmlname//"namelist"//errmsg(sourcefile, __LINE__))
-    end if
-
-    if (masterproc) then
-       write(iulog,*) ' '
-       write(iulog,*) nmlname//' settings:'
-       write(iulog,nml=crop)
-       write(iulog,*) ' '
-    end if
-
-    !-----------------------------------------------------------------------
-
-  end subroutine ReadNML
-
-  !-----------------------------------------------------------------------
   subroutine InitAllocate(this, bounds)
-    ! !USES:
-    !
-    use clm_varpar, only : mxsowings, mxharvests
     !
     ! !ARGUMENTS:
     class(crop_type) , intent(inout) :: this
@@ -199,26 +115,40 @@ contains
     !
     ! !LOCAL VARIABLES:
     integer :: begp, endp
-
+    
     character(len=*), parameter :: subname = 'InitAllocate'
     !-----------------------------------------------------------------------
 
     begp = bounds%begp; endp = bounds%endp
 
-    allocate(this%nyrs_crop_active_patch(begp:endp)) ; this%nyrs_crop_active_patch(:) = 0
-    allocate(this%croplive_patch (begp:endp)) ; this%croplive_patch (:) = .false.
-    allocate(this%harvdate_patch (begp:endp)) ; this%harvdate_patch (:) = huge(1)
-    allocate(this%fertnitro_patch (begp:endp)) ; this%fertnitro_patch (:) = spval
-    allocate(this%hui_patch (begp:endp))      ; this%hui_patch      (:) = spval
-    allocate(this%gddaccum_patch (begp:endp)) ; this%gddaccum_patch (:) = spval
-    allocate(this%gddtsoi_patch  (begp:endp)) ; this%gddtsoi_patch  (:) = spval
-    allocate(this%vf_patch       (begp:endp)) ; this%vf_patch       (:) = 0.0_r8
-    allocate(this%cphase_patch   (begp:endp)) ; this%cphase_patch   (:) = cphase_not_planted
-    allocate(this%latbaset_patch (begp:endp)) ; this%latbaset_patch (:) = spval
-    allocate(this%sdates_thisyr(begp:endp,1:mxsowings)) ; this%sdates_thisyr(:,:) = spval
-    allocate(this%hdates_thisyr(begp:endp,1:mxharvests)) ; this%hdates_thisyr(:,:) = spval
-    allocate(this%sowing_count(begp:endp)) ; this%sowing_count(:) = 0
-    allocate(this%harvest_count(begp:endp)) ; this%harvest_count(:) = 0
+    allocate(this%nyrs_crop_active_patch (begp:endp)) ; this%nyrs_crop_active_patch (:) = 0
+    allocate(this%croplive_patch         (begp:endp)) ; this%croplive_patch         (:) = .false.
+    allocate(this%cropplant_patch        (begp:endp)) ; this%cropplant_patch        (:) = .false.
+    allocate(this%harvdate_patch         (begp:endp)) ; this%harvdate_patch         (:) = huge(1) 
+    allocate(this%fertnitro_patch        (begp:endp)) ; this%fertnitro_patch        (:) = spval
+    allocate(this%gddplant_patch         (begp:endp)) ; this%gddplant_patch         (:) = spval
+    allocate(this%gddtsoi_patch          (begp:endp)) ; this%gddtsoi_patch          (:) = spval
+    allocate(this%crpyld_patch           (begp:endp)) ; this%crpyld_patch           (:) = spval
+    allocate(this%dmyield_patch          (begp:endp)) ; this%dmyield_patch          (:) = spval
+    allocate(this%vf_patch               (begp:endp)) ; this%vf_patch               (:) = 0.0_r8
+    allocate(this%cphase_patch           (begp:endp)) ; this%cphase_patch           (:) = 0.0_r8
+    allocate(this%latbaset_patch         (begp:endp)) ; this%latbaset_patch         (:) = spval
+    allocate(this%cvt_patch              (begp:endp)) ; this%cvt_patch(:) = spval
+    allocate(this%cvp_patch              (begp:endp)) ; this%cvp_patch(:) = spval
+    allocate(this%plantmonth_patch       (begp:endp)) ; this%plantmonth_patch(:) = spval
+    allocate(this%plantday_patch         (begp:endp)) ; this%plantday_patch(:) = spval
+    allocate(this%harvday_patch          (begp:endp)) ; this%harvday_patch(:) = spval
+    allocate(this%xt_patch               (begp:endp,1:12)) ; this%xt_patch(:,:) = spval
+    allocate(this%xp_patch               (begp:endp,1:12)) ; this%xp_patch(:,:) = spval
+    allocate(this%xt_bar_patch           (begp:endp,1:12)) ; this%xt_bar_patch(:,:) = spval
+    allocate(this%xp_bar_patch           (begp:endp,1:12)) ; this%xp_bar_patch(:,:) = spval
+    allocate(this%prev_xt_bar_patch      (begp:endp,1:12)) ; this%prev_xt_bar_patch (:,:) = spval
+    allocate(this%prev_xp_bar_patch      (begp:endp,1:12)) ; this%prev_xp_bar_patch (:,:) = spval
+    allocate(this%p2ETo_patch            (begp:endp,1:12)) ; this%p2ETo_patch(:,:) = spval
+    allocate(this%p2ETo_bar_patch        (begp:endp,1:12)) ; this%p2ETo_bar_patch   (:,:) = spval
+    allocate(this%prev_p2ETo_bar_patch   (begp:endp,1:12)) ; this%prev_p2ETo_bar_patch (:,:) = spval
+    allocate(this%P2E_rm_patch           (begp:endp,1:12)) ; this%P2E_rm_patch(:,:) = spval
+    allocate(this%ETo_patch              (begp:endp,1:12)) ; this%ETo_patch(:,:) = spval
 
   end subroutine InitAllocate
 
@@ -234,111 +164,114 @@ contains
     !
     ! !LOCAL VARIABLES:
     integer :: begp, endp
-
+    
     character(len=*), parameter :: subname = 'InitHistory'
     !-----------------------------------------------------------------------
-
+    
     begp = bounds%begp; endp = bounds%endp
 
-    this%fertnitro_patch(begp:endp) = spval
-    call hist_addfld1d (fname='FERTNITRO', units='gN/m2/yr', &
-         avgflag='A', long_name='Nitrogen fertilizer for each crop', &
-         ptr_patch=this%fertnitro_patch, default='inactive')
-
-    this%hui_patch(begp:endp) = spval
-    call hist_addfld1d (fname='HUI', units='ddays', &
-         avgflag='A', long_name='Crop patch heat unit index', &
-         ptr_patch=this%hui_patch, default='inactive')
-
-    this%gddaccum_patch(begp:endp) = spval
-    call hist_addfld1d (fname='GDDACCUM', units='ddays', &
+    this%gddplant_patch(begp:endp) = spval
+    call hist_addfld1d (fname='GDDPLANT', units='ddays', &
          avgflag='A', long_name='Accumulated growing degree days past planting date for crop', &
-         ptr_patch=this%gddaccum_patch, default='inactive')
+         ptr_patch=this%gddplant_patch, default='inactive')
 
     this%gddtsoi_patch(begp:endp) = spval
     call hist_addfld1d (fname='GDDTSOI', units='ddays', &
          avgflag='A', long_name='Growing degree-days from planting (top two soil layers)', &
          ptr_patch=this%gddtsoi_patch, default='inactive')
 
-    this%cphase_patch(begp:endp) = spval
-    call hist_addfld1d (fname='CPHASE', units='0-not planted, 1-planted, 2-leaf emerge, 3-grain fill, 4-harvest', &
-         avgflag='A', long_name='crop phenology phase', &
-         ptr_patch=this%cphase_patch, default='active')
+    this%crpyld_patch(begp:endp) = spval
+    call hist_addfld1d (fname='CRPYLD', units='bu/acre', &
+         avgflag='X', long_name='Crop yield (bu/acre)', &
+         ptr_patch=this%crpyld_patch)
 
-    if ( (trim(this%baset_mapping) == baset_map_latvary) )then
-       this%latbaset_patch(begp:endp) = spval
-       call hist_addfld1d (fname='LATBASET', units='degree C', &
-            avgflag='A', long_name='latitude vary base temperature for hui', &
-            ptr_patch=this%latbaset_patch, default='inactive')
-    end if
+    this%dmyield_patch(begp:endp) = spval
+    call hist_addfld1d (fname='DMYIELD', units='t/ha', &
+         avgflag='X', long_name='Crop yield (t/ha)', &
+         ptr_patch=this%dmyield_patch)
 
-    this%sdates_thisyr(begp:endp,:) = spval
-    call hist_addfld2d (fname='SDATES', units='day of year', type2d='mxsowings', &
-         avgflag='I', long_name='actual crop sowing dates; should only be output annually', &
-         ptr_patch=this%sdates_thisyr, default='inactive')
+    this%cvt_patch(begp:endp) = spval
+    call hist_addfld1d (fname='CVT', units='1', &
+         avgflag='X', long_name='Temperature Coefficient of Variance', &
+         ptr_patch=this%cvt_patch, default = 'inactive')
 
-    this%hdates_thisyr(begp:endp,:) = spval
-    call hist_addfld2d (fname='HDATES', units='day of year', type2d='mxharvests', &
-         avgflag='I', long_name='actual crop harvest dates; should only be output annually', &
-         ptr_patch=this%hdates_thisyr, default='inactive')
+    this%cvp_patch(begp:endp) = spval
+    call hist_addfld1d (fname='CVP', units='1', &
+         avgflag='X', long_name='Precipitation Coefficient of Variance', &
+         ptr_patch=this%cvp_patch, default = 'inactive')
+
+    this%plantmonth_patch(begp:endp) = spval
+    call hist_addfld1d (fname='PLANTMONTH', units='1', &
+         avgflag='X', long_name='Month of planting', &
+         ptr_patch=this%plantmonth_patch)
+
+    this%plantday_patch(begp:endp) = spval
+    call hist_addfld1d (fname='PLANTDAY', units='doy', &
+         avgflag='M', long_name='Date of planting', &
+         ptr_patch=this%plantday_patch)
+
+    this%harvday_patch(begp:endp) = spval
+    call hist_addfld1d (fname='HARVESTDAY', units='doy', &
+         avgflag='M', long_name='Date of harvest', &
+         ptr_patch=this%harvday_patch)
+
+    this%xt_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='XT', units='Degrees K', type2d='month', &
+         avgflag='A', long_name='Monthly average temperature', &
+         ptr_patch=this%xt_patch, default = 'inactive')
+
+    this%xp_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='XP', units='mm', type2d='month', &
+         avgflag='A', long_name='Monthly total precipitation', &
+         ptr_patch=this%xp_patch, default = 'inactive')
+
+    this%xt_bar_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='XT_BAR', units='Degrees K', type2d='month', &
+         avgflag='A', long_name='EWMA Temperature', &
+         ptr_patch=this%xt_bar_patch, default = 'inactive')
+
+    this%xp_bar_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='XP_bar', units='mm', type2d='month', &
+         avgflag='A', long_name='EMWA Precipitation', &
+         ptr_patch=this%xp_bar_patch, default = 'inactive')
+
+    this%prev_xt_bar_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='PREV_XT_BAR', units='Degrees K', type2d='month', &
+         avgflag='A', long_name='Previous EWMA Temperature', &
+         ptr_patch=this%prev_xt_bar_patch, default = 'inactive')
+
+    this%prev_xp_bar_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='PREV_XP_bar', units='mm', type2d='month', &
+         avgflag='A', long_name='Previous EMWA Precipitation', &
+         ptr_patch=this%prev_xp_bar_patch, default = 'inactive')
+
+    this%p2ETo_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='P2ETO', units='mm', type2d='month', &
+         avgflag='A', long_name='Precipitation:Evapotranspiration ratio', &
+         ptr_patch=this%p2ETo_patch)
+
+    this%p2ETo_bar_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='P2ETO_bar', units='mm', type2d='month', &
+         avgflag='A', long_name='EWMA Precipitation:Evapotranspiration ratio', &
+         ptr_patch=this%p2ETo_bar_patch)
+
+    this%prev_p2ETo_bar_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='PREV_P2ETO_bar', units='mm', type2d='month', &
+         avgflag='A', long_name='Previous EWMA Precipitation:Evapotranspirationratio', &
+         ptr_patch=this%prev_p2ETo_bar_patch)
+
+    this%P2E_rm_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='P2E_rm', units='mm', type2d='month', &
+         avgflag='A', long_name='Precipitation:Evapotranspiration ratio 4-month sum', &
+         ptr_patch=this%P2E_rm_patch)
+
+    this%ETo_patch(begp:endp,:) = spval
+    call hist_addfld2d (fname='ETO', units='mm', type2d='month', &
+         avgflag='A', long_name='Reference Evapotranspiration', &
+         ptr_patch=this%ETo_patch)
 
   end subroutine InitHistory
 
-  subroutine InitCold(this, bounds)
-    ! !USES:
-    use LandunitType, only : lun
-    use landunit_varcon, only : istcrop
-    use PatchType, only : patch
-    use clm_instur, only : fert_cft
-    use pftconMod        , only : pftcon
-    use GridcellType     , only : grc
-    use shr_infnan_mod   , only : nan => shr_infnan_nan, assignment(=)
-    ! !ARGUMENTS:
-    class(crop_type),  intent(inout) :: this
-    type(bounds_type), intent(in) :: bounds
-    !
-    ! !LOCAL VARIABLES:
-    integer :: c, l, g, p, m, ivt ! indices
-
-    character(len=*), parameter :: subname = 'InitCold'
-    !-----------------------------------------------------------------------
-
-!DLL - added wheat & sugarcane restrictions to base T vary by lat
-    do p= bounds%begp,bounds%endp
-       g   = patch%gridcell(p)
-       ivt = patch%itype(p)
-
-       this%nyrs_crop_active_patch(p) = 0
-
-       if ( grc%latdeg(g) >= 0.0_r8 .and. grc%latdeg(g) <= 30.0_r8) then
-          this%latbaset_patch(p)=pftcon%baset(ivt)+12._r8-0.4_r8*grc%latdeg(g)
-       else if (grc%latdeg(g) < 0.0_r8 .and. grc%latdeg(g) >= -30.0_r8) then
-          this%latbaset_patch(p)=pftcon%baset(ivt)+12._r8+0.4_r8*grc%latdeg(g)
-       else
-          this%latbaset_patch(p)=pftcon%baset(ivt)
-       end if
-       if ( trim(this%baset_mapping) == baset_map_constant ) then
-          this%latbaset_patch(p) = nan
-       end if
-    end do
-!DLL -- end of mods
-
-    if (use_crop) then
-       do p= bounds%begp,bounds%endp
-          g = patch%gridcell(p)
-          l = patch%landunit(p)
-          c = patch%column(p)
-
-          if (lun%itype(l) == istcrop) then
-             m = patch%itype(p)
-             this%fertnitro_patch(p) = fert_cft(g,m)
-          end if
-       end do
-    end if
-
-  end subroutine InitCold
-
-  !-----------------------------------------------------------------------
 
     !-----------------------------------------------------------------------
   subroutine InitAccBuffer (this, bounds)
@@ -349,20 +282,20 @@ contains
     ! restart file for restart or branch runs
     ! Each interval and accumulation type is unique to each field processed.
     ! Routine [initAccBuffer] defines the fields to be processed
-    ! and the type of accumulation.
+    ! and the type of accumulation. 
     ! Routine [updateAccVars] does the actual accumulation for a given field.
-    ! Fields are accumulated by calls to subroutine [update_accum_field].
-    ! To accumulate a field, it must first be defined in subroutine [initAccVars]
+    ! Fields are accumulated by calls to subroutine [update_accum_field]. 
+    ! To accumulate a field, it must first be defined in subroutine [initAccVars] 
     ! and then accumulated by calls to [updateAccVars].
     !
-    ! Should only be called if use_crop is true
+    ! Should only be called if crop_prog is true
     !
-    ! !USES
+    ! !USES 
     use accumulMod       , only : init_accum_field
     !
     ! !ARGUMENTS:
     class(crop_type) , intent(in) :: this
-    type(bounds_type), intent(in) :: bounds
+    type(bounds_type), intent(in) :: bounds  
 
     !
     ! !LOCAL VARIABLES:
@@ -370,13 +303,7 @@ contains
 
     !---------------------------------------------------------------------
 
-    ! BACKWARDS_COMPATIBILITY (ssr/wjs, 2022-03-16): old_name specification
-    ! allows correct restarting from files that used GDDPLANT.
-    call init_accum_field (name='HUI', units='K', &
-         desc='heat unit index accumulated since planting', accum_type='runaccum', accum_period=not_used,  &
-         subgrid_type='pft', numlev=1, init_value=0._r8, old_name='GDDPLANT')
-
-    call init_accum_field (name='GDDACCUM', units='K', &
+    call init_accum_field (name='GDDPLANT', units='K', &
          desc='growing degree-days from planting', accum_type='runaccum', accum_period=not_used,  &
          subgrid_type='pft', numlev=1, init_value=0._r8)
 
@@ -392,7 +319,7 @@ contains
     ! !DESCRIPTION:
     ! Initialize module variables that are associated with
     ! time accumulated fields. This routine is called for both an initial run
-    ! and a restart run (and must therefore must be called after the restart file
+    ! and a restart run (and must therefore must be called after the restart file 
     ! is read in and the accumulation buffer is obtained)
     !
     ! !USES:
@@ -408,29 +335,26 @@ contains
     integer  :: nstep
     integer  :: ier
     real(r8), pointer :: rbufslp(:)  ! temporary
-
+    
     character(len=*), parameter :: subname = 'InitAccVars'
     !-----------------------------------------------------------------------
-
+    
     begp = bounds%begp; endp = bounds%endp
 
-    ! Allocate needed dynamic memory for single level patch field
+    ! Allocate needed dynamic memory for single level pft field
     allocate(rbufslp(begp:endp), stat=ier)
     if (ier/=0) then
        write(iulog,*)' in '
        call endrun(msg=" allocation error for rbufslp"//&
-            errMsg(sourcefile, __LINE__))
+            errMsg(__FILE__, __LINE__))
     endif
 
     nstep = get_nstep()
 
-    call extract_accum_field ('HUI', rbufslp, nstep)
-    this%hui_patch(begp:endp) = rbufslp(begp:endp)
+    call extract_accum_field ('GDDPLANT', rbufslp, nstep) 
+    this%gddplant_patch(begp:endp) = rbufslp(begp:endp)
 
-    call extract_accum_field ('GDDACCUM', rbufslp, nstep)
-    this%gddaccum_patch(begp:endp) = rbufslp(begp:endp)
-
-    call extract_accum_field ('GDDTSOI', rbufslp, nstep)
+    call extract_accum_field ('GDDTSOI', rbufslp, nstep) 
     this%gddtsoi_patch(begp:endp)  = rbufslp(begp:endp)
 
     deallocate(rbufslp)
@@ -438,60 +362,27 @@ contains
   end subroutine InitAccVars
 
   !-----------------------------------------------------------------------
-  logical function CallRestartvarDimOK (ncid, flag, dimname)
-    !
-    ! !DESCRIPTION:
-    ! Answer whether to call restartvar(), if necessary checking whether
-    ! a dimension exists in the restart file
-    !
-    ! BACKWARDS_COMPATIBILITY(wjs/ssr, 2022-02-02)
-    ! Used in Restart(). Even though restartvar() can safely be called for a
-    ! non-existent variable, it gives an error for a non-existent dimension, so
-    ! check whether the dimension exists before trying to read. The need for this
-    ! function arose because we recently added the mxsowings and mxharvests
-    ! dimensions to the restart file.
-    !
-    ! !USES:
-    use ncdio_pio
-    !
-    ! !ARGUMENTS:
-    type(file_desc_t), intent(inout) :: ncid
-    character(len=*) , intent(in)    :: flag
-    character(len=*) , intent(in)    :: dimname
-    !
-    ! !LOCAL VARIABLES:
-    !-----------------------------------------------------------------------
-
-    if (flag == 'read') then
-       call check_dim(ncid, dimname, dimexist=CallRestartvarDimOK)
-    else
-       CallRestartvarDimOK = .true.
-    end if
-
-  end function CallRestartvarDimOK
-
-  !-----------------------------------------------------------------------
   subroutine Restart(this, bounds, ncid, flag)
     !
     ! !USES:
     use restUtilMod
     use ncdio_pio
-    use PatchType, only : patch
-    use pftconMod, only : npcropmin, npcropmax
-    use clm_varpar, only : mxsowings, mxharvests
+    use VegetationType , only : veg_pp                
+    use pftvarcon      , only : npcropmin, npcropmax
     !
     ! !ARGUMENTS:
     class(crop_type), intent(inout)  :: this
-    type(bounds_type), intent(in)    :: bounds
-    type(file_desc_t), intent(inout) :: ncid
-    character(len=*) , intent(in)    :: flag
+    type(bounds_type), intent(in)    :: bounds 
+    type(file_desc_t), intent(inout) :: ncid   
+    character(len=*) , intent(in)    :: flag   
     !
     ! !LOCAL VARIABLES:
     integer, pointer :: temp1d(:) ! temporary
     integer :: restyear
     integer :: p
     logical :: readvar   ! determine if variable is on initial file
-    integer :: seasons_found, seasons_loopvar      ! getting number of sowings/harvests in patch
+    real(r8), pointer :: ptr2d(:,:) ! temp. pointers for slicing larger arrays
+    real(r8), pointer :: ptr1d(:)   ! temp. pointers for slicing larger arrays
 
     character(len=*), parameter :: subname = 'Restart'
     !-----------------------------------------------------------------------
@@ -514,8 +405,8 @@ contains
                interpinic_flag='copy', readvar=readvar, data=restyear)
           if (readvar) then
              do p = bounds%begp, bounds%endp
-                if (patch%itype(p) >= npcropmin .and. patch%itype(p) <= npcropmax .and. &
-                     patch%active(p)) then
+                if (veg_pp%itype(p) >= npcropmin .and. veg_pp%itype(p) <= npcropmax .and. &
+                     veg_pp%active(p)) then
                    this%nyrs_crop_active_patch(p) = restyear
                 end if
              end do
@@ -523,7 +414,7 @@ contains
        end if
 
        allocate(temp1d(bounds%begp:bounds%endp))
-       if (flag == 'write') then
+       if (flag == 'write') then 
           do p= bounds%begp,bounds%endp
              if (this%croplive_patch(p)) then
                 temp1d(p) = 1
@@ -536,7 +427,7 @@ contains
             dim1name='pft', &
             long_name='Flag that crop is alive, but not harvested', &
             interpinic_flag='interp', readvar=readvar, data=temp1d)
-       if (flag == 'read') then
+       if (flag == 'read') then 
           do p= bounds%begp,bounds%endp
              if (temp1d(p) == 1) then
                 this%croplive_patch(p) = .true.
@@ -547,8 +438,33 @@ contains
        end if
        deallocate(temp1d)
 
+       allocate(temp1d(bounds%begp:bounds%endp))
+       if (flag == 'write') then 
+          do p= bounds%begp,bounds%endp
+             if (this%cropplant_patch(p)) then
+                temp1d(p) = 1
+             else
+                temp1d(p) = 0
+             end if
+          end do
+       end if
+       call restartvar(ncid=ncid, flag=flag,  varname='cropplant', xtype=ncd_log,  &
+            dim1name='pft', &
+            long_name='Flag that crop is planted, but not harvested' , &
+            interpinic_flag='interp', readvar=readvar, data=temp1d)
+       if (flag == 'read') then 
+          do p= bounds%begp,bounds%endp
+             if (temp1d(p) == 1) then
+                this%cropplant_patch(p) = .true.
+             else
+                this%cropplant_patch(p) = .false.
+             end if
+          end do
+       end if
+       deallocate(temp1d)
+
        call restartvar(ncid=ncid, flag=flag,  varname='harvdate', xtype=ncd_int,  &
-            dim1name='pft', long_name='harvest date', units='jday', nvalid_range=(/1,366/), &
+            dim1name='pft', long_name='harvest date', units='jday', nvalid_range=(/1,366/), & 
             interpinic_flag='interp', readvar=readvar, data=this%harvdate_patch)
 
        call restartvar(ncid=ncid, flag=flag,  varname='vf', xtype=ncd_double,  &
@@ -564,150 +480,155 @@ contains
                                    ! This is so that it properly goes through
                                    ! the crop phases
        end if
+       call restartvar(ncid=ncid, flag=flag, varname='cvt', xtype=ncd_double,  &
+            dim1name='pft', &
+            long_name='temperature coefficient of variance', units='1', &
+            interpinic_flag='interp', readvar=readvar, data=this%cvt_patch)
 
-       ! Read or write variable(s) with mxsowings dimension
-       ! BACKWARDS_COMPATIBILITY(wjs/ssr, 2022-02-02) See note in CallRestartvarDimOK()
-       if (CallRestartvarDimOK(ncid, flag, 'mxsowings')) then
-           call restartvar(ncid=ncid, flag=flag, varname='sdates_thisyr', xtype=ncd_double,  &
-                dim1name='pft', dim2name='mxsowings', switchdim=.true., &
-                long_name='crop sowing dates for this patch this year', units='day of year', &
-                scale_by_thickness=.false., &
-                interpinic_flag='interp', readvar=readvar, data=this%sdates_thisyr)
-           ! Fill variable(s) derived from read-in variable(s)
-           if (flag == 'read' .and. readvar) then
-             do p = bounds%begp,bounds%endp
-                seasons_found = 0
-                do seasons_loopvar = 1,mxsowings
-                   if (this%sdates_thisyr(p,seasons_loopvar) >= 1 .and. this%sdates_thisyr(p,seasons_loopvar) <= 366) then
-                      seasons_found = seasons_loopvar
-                   else
-                      exit
-                   end if
-                end do ! loop through possible sowings
-                this%sowing_count(p) = seasons_found
-             end do ! loop through patches
-           end if
-       end if
+       call restartvar(ncid=ncid, flag=flag, varname='cvp', xtype=ncd_double,  &
+            dim1name='pft', &
+            long_name='precipitation coefficient of variance', units='1', &
+            interpinic_flag='interp', readvar=readvar, data=this%cvp_patch)
 
-       ! Read or write variable(s) with mxharvests dimension
-       ! BACKWARDS_COMPATIBILITY(wjs/ssr, 2022-02-02) See note in CallRestartvarDimOK()
-       if (CallRestartvarDimOK(ncid, flag, 'mxharvests')) then
-           call restartvar(ncid=ncid, flag=flag, varname='hdates_thisyr', xtype=ncd_double,  &
-                dim1name='pft', dim2name='mxharvests', switchdim=.true., &
-                long_name='crop harvest dates for this patch this year', units='day of year', &
-                scale_by_thickness=.false., &
-                interpinic_flag='interp', readvar=readvar, data=this%hdates_thisyr)
-           ! Fill variable(s) derived from read-in variable(s)
-           if (flag == 'read' .and. readvar) then
-             do p = bounds%begp,bounds%endp
-                seasons_found = 0
-                do seasons_loopvar = 1,mxharvests
-                   if (this%hdates_thisyr(p,seasons_loopvar) >= 1 .and. this%hdates_thisyr(p,seasons_loopvar) <= 366) then
-                      seasons_found = seasons_loopvar
-                   else
-                      exit
-                   end if
-                end do ! loop through possible harvests
-                this%harvest_count(p) = seasons_found
-             end do ! loop through patches
-           end if
-       end if
+       call restartvar(ncid=ncid, flag=flag, varname='plantmonth', xtype=ncd_double,  &
+            dim1name='pft', &
+            long_name='Month of planting', units='1', &
+            interpinic_flag='interp', readvar=readvar, data=this%plantmonth_patch)
+
+       ptr2d => this%xt_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='xt', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='monthly average temperature', units='Kelvin', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%xp_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='xp', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='monthly average precipitation', units='mm', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%xt_bar_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='xt_bar', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='ewma temperature', units='Kelvin', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%xp_bar_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='xp_bar', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='ewma precipitation', units='mm', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%prev_xt_bar_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='prev_xt_bar', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='previous ewma temperature', units='Kelvin', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%prev_xp_bar_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='prev_xp_bar', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='previous ewma precipitation', units='mm', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%p2ETo_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='p2ETo', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='precipitation:evapotranspiration ratio', units='mm/s', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%p2ETo_bar_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='p2ETo_bar', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='ewma P:PET', units='1', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%prev_p2ETo_bar_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='prev_p2ETo_bar', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='previous ewma P:PET', units='1', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%P2E_rm_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='P2E_rm', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='precipitation:evapotranspiration ratio 4-month sum', units='mm', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
+       ptr2d => this%ETo_patch(:,:)
+       call restartvar(ncid=ncid, flag=flag, varname='ETo', xtype=ncd_double, &
+            dim1name='pft',dim2name='month', switchdim=.true., &
+            long_name='reference evapotranspiration', units='mm', &
+            interpinic_flag='interp', readvar=readvar, data=ptr2d)
+
     end if
 
   end subroutine Restart
 
-
   !-----------------------------------------------------------------------
-  subroutine CropUpdateAccVars(this, bounds, t_ref2m_patch, t_soisno_col)
+  subroutine UpdateAccVars(this, bounds, temperature_vars)
     !
     ! !DESCRIPTION:
     ! Update accumulated variables. Should be called every time step.
-    ! Should only be called if use_crop is true.
+    !
+    ! Should only be called if crop_prog is true.
     !
     ! !USES:
     use accumulMod       , only : update_accum_field, extract_accum_field, accumResetVal
     use shr_const_mod    , only : SHR_CONST_CDAY, SHR_CONST_TKFRZ
     use clm_time_manager , only : get_step_size, get_nstep
-    use clm_varpar       , only : nlevsno, nlevgrnd
-    use pftconMod        , only : nswheat, nirrig_swheat, pftcon
-    use pftconMod        , only : nwwheat, nirrig_wwheat
-    use pftconMod        , only : nsugarcane, nirrig_sugarcane
-    use ColumnType       , only : col
-    use PatchType        , only : patch
+    use pftvarcon        , only : nwcereal, nwcerealirrig, mxtmp, baset
+    use TemperatureType  , only : temperature_type
+    use VegetationType   , only : veg_pp                
+    use ColumnType       , only : col_pp
     !
     ! !ARGUMENTS:
-    implicit none
     class(crop_type)       , intent(inout) :: this
     type(bounds_type)      , intent(in)    :: bounds
-    real(r8)               , intent(in)    :: t_ref2m_patch( bounds%begp:)
-    real(r8)               , intent(inout) :: t_soisno_col(bounds%begc:, -nlevsno+1:)
+    type(temperature_type) , intent(in)    :: temperature_vars
     !
     ! !LOCAL VARIABLES:
-    integer :: p,c,g ! indices
+    integer :: p,c   ! indices
     integer :: ivt   ! vegetation type
     integer :: dtime ! timestep size [seconds]
     integer :: nstep ! timestep number
     integer :: ier   ! error status
     integer :: begp, endp
-    integer :: begc, endc
-    real(r8), pointer :: rbufslp(:)      ! temporary single level - patch level
-    character(len=*), parameter :: subname = 'CropUpdateAccVars'
+    real(r8), pointer :: rbufslp(:)      ! temporary single level - pft level
+    
+    character(len=*), parameter :: subname = 'UpdateAccVars'
     !-----------------------------------------------------------------------
-
+    
     begp = bounds%begp; endp = bounds%endp
-    begc = bounds%begc; endc = bounds%endc
-
-    ! Enforce expected array sizes
-    SHR_ASSERT_ALL_FL((ubound(t_ref2m_patch)  == (/endp/))          , sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(t_soisno_col)   == (/endc,nlevgrnd/)) , sourcefile, __LINE__)
 
     dtime = get_step_size()
     nstep = get_nstep()
 
-    ! Allocate needed dynamic memory for single level patch field
+    ! Allocate needed dynamic memory for single level pft field
 
     allocate(rbufslp(begp:endp), stat=ier)
     if (ier/=0) then
        write(iulog,*)'update_accum_hist allocation error for rbuf1dp'
-       call endrun(msg=errMsg(sourcefile, __LINE__))
+       call endrun(msg=errMsg(__FILE__, __LINE__))
     endif
 
-    ! Update HUI. This is not standard for accumulation fields,
-    ! but HUI needs it because it can be changed outside this
-    ! accumulation routine (see CropPhenology). This requires
-    ! the accumulation buffer to be reset.
-    call extract_accum_field ('HUI', rbufslp, nstep)
-    do p = begp,endp
-      rbufslp(p) = max(0.0_r8,this%hui_patch(p)-rbufslp(p))
-    end do
-    call update_accum_field  ('HUI', rbufslp, nstep)
-
-    ! Accumulate and extract HUI and GDDACCUM
+    ! Accumulate and extract GDDPLANT
+    
     do p = begp,endp
        if (this%croplive_patch(p)) then ! relative to planting date
-          ivt = patch%itype(p)
-          if ( (trim(this%baset_mapping) == baset_map_latvary) .and. &
-             ((ivt == nswheat) .or. (ivt == nirrig_swheat) .or. &
-              (ivt == nsugarcane) .or. (ivt == nirrig_sugarcane)) ) then
-             rbufslp(p) = max(0._r8, min(pftcon%mxtmp(ivt), &
-             t_ref2m_patch(p)-(SHR_CONST_TKFRZ + this%latbaset_patch(p)))) &
-             * dtime/SHR_CONST_CDAY
-          else
-             rbufslp(p) = max(0._r8, min(pftcon%mxtmp(ivt), &
-             t_ref2m_patch(p)-(SHR_CONST_TKFRZ + pftcon%baset(ivt)))) &
-             * dtime/SHR_CONST_CDAY
-          end if
-          if (ivt == nwwheat .or. ivt == nirrig_wwheat) then
-             rbufslp(p) = rbufslp(p) * this%vf_patch(p)
+          ivt = veg_pp%itype(p)
+          rbufslp(p) = max(0._r8, min(mxtmp(ivt), &
+               veg_es%t_ref2m(p)-(SHR_CONST_TKFRZ + baset(ivt)))) &
+               * dtime/SHR_CONST_CDAY
+          if (ivt == nwcereal .or. ivt == nwcerealirrig) then
+             rbufslp(p) = rbufslp(p)*this%vf_patch(p)
           end if
        else
           rbufslp(p) = accumResetVal
        end if
     end do
-    call update_accum_field  ('HUI', rbufslp, nstep)
-    call extract_accum_field ('HUI', this%hui_patch, nstep)
-    call update_accum_field  ('GDDACCUM', rbufslp, nstep)
-    call extract_accum_field ('GDDACCUM', this%gddaccum_patch, nstep)
+    call update_accum_field  ('GDDPLANT', rbufslp, nstep)
+    call extract_accum_field ('GDDPLANT', this%gddplant_patch, nstep)
 
     ! Accumulate and extract GDDTSOI
     ! In agroibis this variable is calculated
@@ -715,14 +636,14 @@ contains
 
     do p = begp,endp
        if (this%croplive_patch(p)) then ! relative to planting date
-          ivt = patch%itype(p)
-          c   = patch%column(p)
-          rbufslp(p) = max(0._r8, min(pftcon%mxtmp(ivt), &
-               ((t_soisno_col(c,1)*col%dz(c,1) + &
-               t_soisno_col(c,2)*col%dz(c,2))/(col%dz(c,1)+col%dz(c,2))) - &
-               (SHR_CONST_TKFRZ + pftcon%baset(ivt)))) * dtime/SHR_CONST_CDAY
-          if (ivt == nwwheat .or. ivt == nwwheat) then
-             rbufslp(p) = rbufslp(p) * this%vf_patch(p)
+          ivt = veg_pp%itype(p)
+          c = veg_pp%column(p)
+          rbufslp(p) = max(0._r8, min(mxtmp(ivt), &
+               ((col_es%t_soisno(c,1)*col_pp%dz(c,1) + &
+               col_es%t_soisno(c,2)*col_pp%dz(c,2))/(col_pp%dz(c,1)+col_pp%dz(c,2))) - &
+               (SHR_CONST_TKFRZ + baset(ivt)))) * dtime/SHR_CONST_CDAY
+          if (ivt == nwcereal .or. ivt == nwcerealirrig) then
+             rbufslp(p) = rbufslp(p)*this%vf_patch(p)
           end if
        else
           rbufslp(p) = accumResetVal
@@ -733,7 +654,7 @@ contains
 
     deallocate(rbufslp)
 
-  end subroutine CropUpdateAccVars
+  end subroutine UpdateAccVars
 
   !-----------------------------------------------------------------------
   subroutine CropIncrementYear (this, num_pcropp, filter_pcropp)
@@ -760,8 +681,10 @@ contains
     !-----------------------------------------------------------------------
 
     call get_curr_date (   kyr, kmo, kda, mcsec)
-    ! Update nyrs when it's the end of the year (unless it's the very start of the
-    ! run). This assumes that, if this patch is active at the end of the year, then it was
+    ! Update nyrs when it's the end of the year (unless it's the very start of
+    ! the
+    ! run). This assumes that, if this patch is active at the end of the year,
+    ! then it was
     ! active for the whole year.
     if ((kmo == 1 .and. kda == 1 .and. mcsec == 0) .and. .not. is_first_step()) then
        do fp = 1, num_pcropp
@@ -773,10 +696,10 @@ contains
 
   end subroutine CropIncrementYear
 
-  !-----------------------------------------------------------------------
+ !-----------------------------------------------------------------------
   subroutine checkDates( )
     !
-    ! !DESCRIPTION:
+    ! !DESCRIPTION: 
     ! Make sure the dates are compatible. The date given to startup the model
     ! and the date on the restart file must be the same although years can be
     ! different. The dates need to be checked when the restart file is being
@@ -789,8 +712,8 @@ contains
     !
     ! !ARGUMENTS:
     use clm_time_manager, only : get_driver_start_ymd, get_start_date
-    use clm_varctl      , only : iulog
-    use clm_varctl      , only : nsrest, nsrBranch, nsrStartup
+    use elm_varctl      , only : iulog
+    use elm_varctl      , only : nsrest, nsrBranch, nsrStartup
     !
     ! !LOCAL VARIABLES:
     integer :: stymd       ! Start date YYYYMMDD from driver
@@ -821,10 +744,11 @@ contains
                (stmon_day - stmon_day/100)
           call endrun(msg=' ERROR: For prognostic crop to work correctly, the start date (month and day)'// &
                ' and the date on the restart file needs to match (years can be different)'//&
-               errMsg(sourcefile, __LINE__))
+               errMsg(__FILE__, __LINE__))
        end if
     end if
 
   end subroutine checkDates
 
 end module CropType
+

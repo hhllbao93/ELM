@@ -257,7 +257,7 @@ def buildnml(cime_path, rundir):
         # the initial conditions file (which is pretty much irrelevant when running
         # with lilac).
         "-namelist",
-        "&clm_inparm  start_ymd=20000101 {} /".format(extra_namelist_opts),
+        "&elm_inparm  start_ymd=20000101 {} /".format(extra_namelist_opts),
         "-use_case",
         use_case,
         # For now, we assume ignore_ic_year, not ignore_ic_date

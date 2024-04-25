@@ -3,13 +3,13 @@ module ColumnType
   !-----------------------------------------------------------------------
   ! !DESCRIPTION:
   ! Column data type allocation and initialization
-  ! -------------------------------------------------------- 
+  ! --------------------------------------------------------
   ! column types can have values of
-  ! -------------------------------------------------------- 
+  ! --------------------------------------------------------
   !   1  => (istsoil)          soil (vegetated or bare soil)
   !   2  => (istcrop)          crop (only for crop configuration)
-  !   3  => (UNUSED)           (formerly non-multiple elevation class land ice; currently unused)
-  !   4  => (istice)           land ice
+  !   3  => (istice)           land ice
+  !   4  => (istice_mec)       land ice (multiple elevation classes)
   !   5  => (istdlak)          deep lake
   !   6  => (istwet)           wetland
   !   71 => (icol_roof)        urban roof
@@ -20,147 +20,144 @@ module ColumnType
   !
   use shr_kind_mod   , only : r8 => shr_kind_r8
   use shr_infnan_mod , only : nan => shr_infnan_nan, assignment(=)
-  use clm_varpar     , only : nlevsno, nlevgrnd, nlevlak, nlevmaxurbgrnd
-  use clm_varcon     , only : spval, ispval
-  use shr_sys_mod    , only : shr_sys_abort
-  use clm_varctl     , only : iulog
-  use column_varcon  , only : is_hydrologically_active
-  use LandunitType   , only : lun
+  use elm_varpar     , only : nlevsno, nlevgrnd, nlevlak, nlevslp
+  use elm_varcon     , only : spval, ispval
   !
   ! !PUBLIC TYPES:
   implicit none
   save
   private
-  !
-  type, public :: column_type
-     ! g/l/c/p hierarchy, local g/l/c/p cells only
-     integer , pointer :: landunit             (:)   ! index into landunit level quantities
-     real(r8), pointer :: wtlunit              (:)   ! weight (relative to landunit)
-     integer , pointer :: gridcell             (:)   ! index into gridcell level quantities
-     real(r8), pointer :: wtgcell              (:)   ! weight (relative to gridcell)
-     integer , pointer :: patchi               (:)   ! beginning patch index for each column
-     integer , pointer :: patchf               (:)   ! ending patch index for each column
-     integer , pointer :: npatches             (:)   ! number of patches for each column
+
+  !-----------------------------------------------------------------------
+  ! Define the data structure that holds physical property information at the column level.
+  !-----------------------------------------------------------------------
+  type, public :: column_physical_properties
+     ! indices and weights for higher subgrid levels (landunit, topounit, gridcell)
+     integer , pointer :: gridcell     (:) => null() ! index into gridcell level quantities
+     real(r8), pointer :: wtgcell      (:) => null() ! weight (relative to gridcell)
+     integer , pointer :: topounit     (:) => null() ! index into topounit level quantities
+     real(r8), pointer :: wttopounit   (:) => null() ! weight (relative to topounit)
+     integer , pointer :: landunit     (:) => null() ! index into landunit level quantities
+     real(r8), pointer :: wtlunit      (:) => null() ! weight (relative to landunit)
+
+     ! Starting and ending indices for subgrid types below the column level
+     integer , pointer :: pfti         (:) => null() ! beginning pft index for each column
+     integer , pointer :: pftf         (:) => null() ! ending pft index for each column
+     integer , pointer :: npfts        (:) => null() ! number of patches for each column
 
      ! topological mapping functionality
-     integer , pointer :: itype                (:)   ! column type (after init, should only be modified via update_itype routine)
-     integer , pointer :: lun_itype            (:)   ! landunit type (col%lun_itype(ci) is the
-                                                     ! same as lun%itype(col%landunit(ci)), but is often a more convenient way to access this type
-     logical , pointer :: active               (:)   ! true=>do computations on this column
-     logical , pointer :: type_is_dynamic      (:)   ! true=>itype can change throughout the run
-     
-     logical , pointer :: is_fates             (:)   ! .true. -> this is a fates column
-                                                     ! .false. -> this is NOT a fates column
-     
+     integer , pointer :: itype        (:) => null() ! column type
+     logical , pointer :: active       (:) => null() ! true=>do computations on this column
+
      ! topography
-     ! TODO(wjs, 2016-04-05) Probably move these things into topoMod
-     real(r8), pointer :: micro_sigma          (:)   ! microtopography pdf sigma (m)
-     real(r8), pointer :: topo_slope           (:)   ! gridcell topographic slope
-     real(r8), pointer :: topo_std             (:)   ! gridcell elevation standard deviation
+     real(r8), pointer :: glc_topo     (:) => null() ! surface elevation (m)
+     real(r8), pointer :: micro_sigma  (:) => null() ! microtopography pdf sigma (m)
+     real(r8), pointer :: n_melt       (:) => null() ! SCA shape parameter
+     real(r8), pointer :: topo_slope   (:) => null() ! gridcell topographic slope
+     real(r8), pointer :: topo_std     (:) => null() ! gridcell elevation standard deviation
+     real(r8), pointer :: hslp_p10     (:,:) => null() ! hillslope slope percentiles (unitless)
+     integer, pointer  :: nlevbed      (:) => null() ! number of layers to bedrock
+     real(r8), pointer :: zibed        (:) => null() ! bedrock depth in model (interface level at nlevbed)
 
      ! vertical levels
-     integer , pointer :: snl                  (:)   ! number of snow layers
-     real(r8), pointer :: dz                   (:,:) ! layer thickness (m)  (-nlevsno+1:nlevgrnd) 
-     real(r8), pointer :: z                    (:,:) ! layer depth (m) (-nlevsno+1:nlevgrnd) 
-     real(r8), pointer :: zi                   (:,:) ! interface level below a "z" level (m) (-nlevsno+0:nlevgrnd) 
-     real(r8), pointer :: zii                  (:)   ! convective boundary height [m]
-     real(r8), pointer :: dz_lake              (:,:) ! lake layer thickness (m)  (1:nlevlak)
-     real(r8), pointer :: z_lake               (:,:) ! layer depth for lake (m)
-     real(r8), pointer :: lakedepth            (:)   ! variable lake depth (m)                             
-     integer , pointer :: nbedrock             (:)   ! variable depth to bedrock index
+     integer , pointer :: snl          (:)   => null() ! number of snow layers
+     real(r8), pointer :: dz           (:,:) => null() ! layer thickness (m)  (-nlevsno+1:nlevgrnd)
+     real(r8), pointer :: z            (:,:) => null() ! layer depth (m) (-nlevsno+1:nlevgrnd)
+     real(r8), pointer :: zi           (:,:) => null() ! interface level below a "z" level (m) (-nlevsno+0:nlevgrnd)
+     real(r8), pointer :: zii          (:)   => null() ! convective boundary height [m]
+     real(r8), pointer :: dz_lake      (:,:) => null() ! lake layer thickness (m)  (1:nlevlak)
+     real(r8), pointer :: z_lake       (:,:) => null() ! layer depth for lake (m)
+     real(r8), pointer :: lakedepth    (:)   => null() ! variable lake depth (m)
 
      ! other column characteristics
-     logical , pointer :: hydrologically_active(:)   ! true if this column is a hydrologically active type
-     logical , pointer :: urbpoi               (:)   ! true=>urban point
+     logical , pointer :: hydrologically_active(:) => null()  ! true if this column is a hydrologically active type
 
-     ! levgrnd_class gives the class in which each layer falls. This is relevant for
-     ! columns where there are 2 or more fundamentally different layer types. For
-     ! example, this distinguishes between soil and bedrock layers. The particular value
-     ! assigned to each class is irrelevant; the important thing is that different
-     ! classes (e.g., soil vs. bedrock) have different values of levgrnd_class.
-     !
-     ! levgrnd_class = ispval indicates that the given layer is completely unused for
-     ! this column (i.e., this column doesn't use the full nlevgrnd layers).
-     integer , pointer :: levgrnd_class        (:,:) ! class in which each layer falls (1:nlevgrnd)
+     ! Is this a FATES column?
+     logical, pointer :: is_fates(:) => null() ! True if this column is associated with a FATES active column
+                                               ! False if otherwise. If fates is turned off, this array is
+                                               ! all false
    contains
 
-     procedure, public :: Init
-     procedure, public :: Clean
+     procedure, public :: Init => col_pp_init
 
-     ! Update the column type for one column. Any updates to col%itype after
-     ! initialization should be made via this routine.
-     procedure, public :: update_itype
+  end type column_physical_properties
 
-  end type column_type
 
-  type(column_type), public, target :: col !column data structure (soil/snow/canopy columns)
+  !-----------------------------------------------------------------------
+  ! declare the public instance of column-level meta-data type
+  !-----------------------------------------------------------------------
+  type(column_physical_properties)   , public, target :: col_pp    ! column physical properties
+  !$acc declare create(col_pp)
+
   !------------------------------------------------------------------------
 
 contains
-  
+
   !------------------------------------------------------------------------
-  subroutine Init(this, begc, endc)
+  subroutine col_pp_init(this, begc, endc)
     !
     ! !ARGUMENTS:
-    class(column_type)  :: this
+    class(column_physical_properties)  :: this
     integer, intent(in) :: begc,endc
     !------------------------------------------------------------------------
 
     ! The following is set in initGridCellsMod
     allocate(this%gridcell    (begc:endc))                     ; this%gridcell    (:)   = ispval
     allocate(this%wtgcell     (begc:endc))                     ; this%wtgcell     (:)   = nan
+    allocate(this%topounit    (begc:endc))                     ; this%topounit    (:)   = ispval
+    allocate(this%wttopounit  (begc:endc))                     ; this%wttopounit  (:)   = nan
     allocate(this%landunit    (begc:endc))                     ; this%landunit    (:)   = ispval
     allocate(this%wtlunit     (begc:endc))                     ; this%wtlunit     (:)   = nan
-    allocate(this%patchi      (begc:endc))                     ; this%patchi      (:)   = ispval
-    allocate(this%patchf      (begc:endc))                     ; this%patchf      (:)   = ispval
-    allocate(this%npatches     (begc:endc))                    ; this%npatches     (:)   = ispval
+    allocate(this%pfti        (begc:endc))                     ; this%pfti        (:)   = ispval
+    allocate(this%pftf        (begc:endc))                     ; this%pftf        (:)   = ispval
+    allocate(this%npfts       (begc:endc))                     ; this%npfts       (:)   = ispval
     allocate(this%itype       (begc:endc))                     ; this%itype       (:)   = ispval
-    allocate(this%lun_itype   (begc:endc))                     ; this%lun_itype   (:)   = ispval
     allocate(this%active      (begc:endc))                     ; this%active      (:)   = .false.
-    allocate(this%type_is_dynamic(begc:endc))                  ; this%type_is_dynamic(:) = .false.
 
-    allocate(this%is_fates(begc:endc))                         ; this%is_fates(:) = .false.
-    
     ! The following is set in initVerticalMod
     allocate(this%snl         (begc:endc))                     ; this%snl         (:)   = ispval  !* cannot be averaged up
-    allocate(this%dz          (begc:endc,-nlevsno+1:nlevmaxurbgrnd)) ; this%dz          (:,:) = nan
-    allocate(this%z           (begc:endc,-nlevsno+1:nlevmaxurbgrnd)) ; this%z           (:,:) = nan
-    allocate(this%zi          (begc:endc,-nlevsno+0:nlevmaxurbgrnd)) ; this%zi          (:,:) = nan
+    allocate(this%dz          (begc:endc,-nlevsno+1:nlevgrnd)) ; this%dz          (:,:) = nan
+    allocate(this%z           (begc:endc,-nlevsno+1:nlevgrnd)) ; this%z           (:,:) = nan
+    allocate(this%zi          (begc:endc,-nlevsno+0:nlevgrnd)) ; this%zi          (:,:) = nan
     allocate(this%zii         (begc:endc))                     ; this%zii         (:)   = nan
-    allocate(this%lakedepth   (begc:endc))                     ; this%lakedepth   (:)   = spval  
+    allocate(this%lakedepth   (begc:endc))                     ; this%lakedepth   (:)   = spval
     allocate(this%dz_lake     (begc:endc,nlevlak))             ; this%dz_lake     (:,:) = nan
     allocate(this%z_lake      (begc:endc,nlevlak))             ; this%z_lake      (:,:) = nan
 
-    allocate(this%nbedrock   (begc:endc))                      ; this%nbedrock   (:)   = ispval  
-    allocate(this%levgrnd_class(begc:endc,nlevmaxurbgrnd))     ; this%levgrnd_class(:,:) = ispval
+    allocate(this%glc_topo    (begc:endc))                     ; this%glc_topo    (:)   = nan
     allocate(this%micro_sigma (begc:endc))                     ; this%micro_sigma (:)   = nan
+    allocate(this%n_melt      (begc:endc))                     ; this%n_melt      (:)   = nan
     allocate(this%topo_slope  (begc:endc))                     ; this%topo_slope  (:)   = nan
     allocate(this%topo_std    (begc:endc))                     ; this%topo_std    (:)   = nan
+    allocate(this%hslp_p10    (begc:endc,nlevslp))             ; this%hslp_p10    (:,:) = nan
+    allocate(this%nlevbed     (begc:endc))                     ; this%nlevbed     (:)   = ispval
+    allocate(this%zibed       (begc:endc))                     ; this%zibed       (:)   = nan
 
     allocate(this%hydrologically_active(begc:endc))            ; this%hydrologically_active(:) = .false.
-    allocate(this%urbpoi      (begc:endc))                     ; this%urbpoi      (:)   = .false.
 
-  end subroutine Init
+    ! Assume that columns are not fates columns until fates initialization begins
+    allocate(this%is_fates(begc:endc)); this%is_fates(:) = .false.
+    
+  end subroutine col_pp_init
 
   !------------------------------------------------------------------------
-  subroutine Clean(this)
+  subroutine col_pp_clean(this)
     !
     ! !ARGUMENTS:
-    class(column_type) :: this
+    class(column_physical_properties) :: this
     !------------------------------------------------------------------------
 
     deallocate(this%gridcell   )
     deallocate(this%wtgcell    )
+    deallocate(this%topounit   )
+    deallocate(this%wttopounit )
     deallocate(this%landunit   )
     deallocate(this%wtlunit    )
-    deallocate(this%patchi     )
-    deallocate(this%patchf     )
-    deallocate(this%npatches    )
+    deallocate(this%pfti       )
+    deallocate(this%pftf       )
+    deallocate(this%npfts      )
     deallocate(this%itype      )
-    deallocate(this%lun_itype  )
     deallocate(this%active     )
-    deallocate(this%is_fates   )
-    deallocate(this%type_is_dynamic)
     deallocate(this%snl        )
     deallocate(this%dz         )
     deallocate(this%z          )
@@ -169,52 +166,17 @@ contains
     deallocate(this%lakedepth  )
     deallocate(this%dz_lake    )
     deallocate(this%z_lake     )
+    deallocate(this%glc_topo   )
     deallocate(this%micro_sigma)
+    deallocate(this%n_melt     )
     deallocate(this%topo_slope )
     deallocate(this%topo_std   )
-    deallocate(this%nbedrock   )
-    deallocate(this%levgrnd_class)
+    deallocate(this%hslp_p10   )
+    deallocate(this%nlevbed    )
+    deallocate(this%zibed      )
     deallocate(this%hydrologically_active)
-    deallocate(this%urbpoi)
-
-  end subroutine Clean
-
-  !-----------------------------------------------------------------------
-  subroutine update_itype(this, c, itype)
-    !
-    ! !DESCRIPTION:
-    ! Update the column type for one column. Any updates to col%itype after
-    ! initialization should be made via this routine.
-    !
-    ! This can NOT be used to change the landunit type: it can only be used to change the
-    ! column type within a fixed landunit.
-    !
-    ! !ARGUMENTS:
-    class(column_type), intent(inout) :: this
-    integer, intent(in) :: c
-    integer, intent(in) :: itype
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'update_itype'
-    !-----------------------------------------------------------------------
-
-    if (col%type_is_dynamic(c)) then
-       col%itype(c) = itype
-       col%hydrologically_active(c) = is_hydrologically_active( &
-            col_itype = itype, &
-            lun_itype = col%lun_itype(c))
-       ! Properties that are tied to the landunit's properties (like urbpoi) are assumed
-       ! not to change here.
-    else
-       write(iulog,*) subname//' ERROR: attempt to update itype when type_is_dynamic is false'
-       write(iulog,*) 'c, col%itype(c), itype = ', c, col%itype(c), itype
-       ! Need to use shr_sys_abort rather than endrun, because using endrun would cause
-       ! circular dependencies
-       call shr_sys_abort(subname//' ERROR: attempt to update itype when type_is_dynamic is false')
-    end if
-  end subroutine update_itype
-
-
+    deallocate(this%is_fates)
+    
+  end subroutine col_pp_clean
 
 end module ColumnType

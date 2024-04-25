@@ -7,15 +7,11 @@ module DaylengthMod
 #include "shr_assert.h"
   use shr_kind_mod , only : r8 => shr_kind_r8
   use decompMod    , only : bounds_type
-  use GridcellType , only : grc                
+  use GridcellType , only : grc_pp                
   !
   implicit none
   save
   private
-
-  ! TODO(wjs, 2018-05-16) We should make this object-oriented, and move max_dayl, dayl
-  ! and prev_dayl out of GridcellType into a new type defined here. Then can also move
-  ! the hist_addfld1d calls for DAYL and PREV_DAYL to here.
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   public :: InitDaylength     ! initialize daylength for all grid cells
@@ -120,9 +116,11 @@ contains
   end subroutine ComputeMaxDaylength
 
   !-----------------------------------------------------------------------
+!hh!  subroutine InitDaylength(bounds, declin, declinm1)
   subroutine InitDaylength(bounds, declin, declinm1, obliquity)
     !
     ! !DESCRIPTION:
+!hh!    ! Initialize daylength for all grid cells, and initialize previous daylength.
     ! Initialize daylength, previous daylength and max daylength for all grid cells.
     !
     ! This should be called with declin set at the value for the first model time step,
@@ -137,10 +135,10 @@ contains
     !-----------------------------------------------------------------------
 
     associate(&
-    lat       => grc%lat,       & ! Input:   [real(r8) (:)] latitude (radians)
-    dayl      => grc%dayl,      & ! Output:  [real(r8) (:)] day length (s)
-    prev_dayl => grc%prev_dayl, & ! Output:  [real(r8) (:)] day length from previous time step (s)
-    max_dayl  => grc%max_dayl , & ! Output:  [real(r8) (:)] maximum day length (s)
+    lat       => grc_pp%lat,       & ! Input:   [real(r8) (:)] latitude (radians)
+    dayl      => grc_pp%dayl,      & ! Output:  [real(r8) (:)] day length (s)
+    prev_dayl => grc_pp%prev_dayl, & ! Output:  [real(r8) (:)] day length from previous time step (s)
+    max_dayl  => grc_pp%max_dayl , & ! Output:  [real(r8) (:)] maximum day length (s)
 
     begg      => bounds%begg  , & ! beginning grid cell index
     endg      => bounds%endg    & ! ending grid cell index
@@ -149,6 +147,7 @@ contains
     prev_dayl(begg:endg) = daylength(lat(begg:endg), declinm1)
     dayl(begg:endg) = daylength(lat(begg:endg), declin)
 
+!hh!    first_step = .true.
     call ComputeMaxDaylength(bounds, &
          lat = lat(bounds%begg:bounds%endg), &
          obliquity = obliquity, &
@@ -160,12 +159,12 @@ contains
 
 
   !-----------------------------------------------------------------------
+!hh!  subroutine UpdateDaylength(bounds, declin)
   subroutine UpdateDaylength(bounds, declin, obliquity)
     !
     ! !DESCRIPTION:
-    ! Update daylength, previous daylength and max daylength for all grid cells.
-    !
-    ! This should be called exactly once per time step.
+    ! Update daylength for all grid cells, and set previous daylength. This should be
+    ! called exactly once per time step.
     !
     ! Assumes that InitDaylength has been called in initialization. This Update routine
     ! should NOT be called in initialization.
@@ -181,10 +180,10 @@ contains
     !-----------------------------------------------------------------------
 
     associate(&
-    lat       => grc%lat,       & ! Input:  [real(r8) (:)] latitude (radians)
-    dayl      => grc%dayl,      & ! InOut:  [real(r8) (:)] day length (s)
-    prev_dayl => grc%prev_dayl, & ! Output: [real(r8) (:)] day length from previous time step (s)
-    max_dayl  => grc%max_dayl , & ! Output: [real(r8) (:)] maximum day length (s)
+    lat       => grc_pp%lat,       & ! Input:  [real(r8) (:)] latitude (radians)
+    dayl      => grc_pp%dayl,      & ! InOut:  [real(r8) (:)] day length (s)
+    prev_dayl => grc_pp%prev_dayl, & ! Output: [real(r8) (:)] day length from previous time step (s)
+    max_dayl  => grc_pp%max_dayl , & ! Output: [real(r8) (:)] maximum day length (s)
 
     begg      => bounds%begg  , & ! beginning grid cell index
     endg      => bounds%endg    & ! ending grid cell index

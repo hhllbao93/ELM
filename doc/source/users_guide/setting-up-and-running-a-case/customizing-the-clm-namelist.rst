@@ -66,7 +66,7 @@ Example 1-2. Default CLM Namelist
 ---------------------------------
 ::
 
-     &clm_inparm
+     &elm_inparm
       albice = 0.60,0.40
       co2_ppmv = 284.7
       co2_type = 'constant'

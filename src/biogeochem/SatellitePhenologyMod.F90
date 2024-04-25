@@ -9,19 +9,36 @@ module SatellitePhenologyMod
   ! so that DryDeposition code can get estimates of LAI differences between months.
   !
   ! !USES:
-  use shr_kind_mod , only : r8 => shr_kind_r8, CL => shr_kind_CL, CS => shr_kind_CS
-  use shr_log_mod  , only : errMsg => shr_log_errMsg
-  use decompMod    , only : bounds_type
-  use abortutils   , only : endrun
-  use clm_varctl   , only : iulog, use_lai_streams
-  use perf_mod     , only : t_startf, t_stopf
-  use spmdMod      , only : masterproc, mpicom, iam
-  use laiStreamMod , only : lai_init, lai_advance, lai_interp
-  use ncdio_pio
+  use ESMF             , only : ESMF_LogFoundError, ESMF_LOGERR_PASSTHRU, ESMF_Finalize, ESMF_END_ABORT
+  use dshr_strdata_mod , only : shr_strdata_type, shr_strdata_print
+  use shr_kind_mod    , only : r8 => shr_kind_r8
+  use shr_kind_mod    , only : CL => shr_kind_CL
+  use shr_kind_mod    , only : CX => shr_kind_CXX
+  use shr_log_mod     , only : errMsg => shr_log_errMsg
+  use decompMod       , only : bounds_type
+  use abortutils      , only : endrun
+  use elm_varctl      , only : scmlat,scmlon,single_column
+  use elm_varctl      , only : iulog, use_lai_streams
+  use elm_varcon      , only : grlnd
+  use controlMod      , only : NLFilename
+  use decompMod       , only : gsmap_lnd_gdc2glo
+  use domainMod       , only : ldomain
+  use fileutils       , only : getavu, relavu
+  use VegetationType       , only : veg_pp
+  use CanopyStateType , only : canopystate_type
+  use WaterstateType  , only : waterstate_type
+  use ColumnDataType  , only : col_ws
+  use perf_mod        , only : t_startf, t_stopf
+  use spmdMod         , only : masterproc
+  use spmdMod         , only : mpicom, iam 
+  use mct_mod
+  use ncdio_pio   
+  use topounit_varcon , only : max_topounits
+  use GridcellType    , only : grc_pp
   !
   ! !PUBLIC TYPES:
   implicit none
-  private
+  save
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   public :: SatellitePhenology     ! CLMSP Ecosystem dynamics: phenology, vegetation
@@ -31,22 +48,262 @@ module SatellitePhenologyMod
   !
   ! !PRIVATE MEMBER FUNCTIONS:
   private :: readMonthlyVegetation   ! read monthly vegetation data for two months
-  !
+  private :: lai_init    ! position datasets for LAI
+  private :: lai_advance ! Advance the LAI streams (outside of a Open-MP threading loop)
+  private :: lai_interp  ! interpolates between two years of LAI data
+
   ! !PRIVATE MEMBER DATA:
-  integer                     :: InterpMonths1      ! saved month index
-  real(r8)                    :: timwt(2)           ! time weights for month 1 and month 2
-  real(r8), allocatable       :: mlai2t(:,:)        ! lai for interpolation (2 months)
-  real(r8), allocatable       :: msai2t(:,:)        ! sai for interpolation (2 months)
-  real(r8), allocatable       :: mhvt2t(:,:)        ! top vegetation height for interpolation (2 months)
-  real(r8), allocatable       :: mhvb2t(:,:)        ! bottom vegetation height for interpolation(2 months)
+  integer, allocatable        :: g_to_ig(:)         ! Array matching gridcell index to data index
+  type(shr_strdata_type) :: sdat_lai           ! LAI input data stream
+  character(*), parameter     :: laiString = "LAI_" ! base string for field string
+  integer     , parameter     :: numLaiFields = 16  ! number of fields to build field string
+  character(len=CX)           :: stream_varnames(numLaiFields)
+  !
+  ! !PRIVATE TYPES:
+  integer , private :: InterpMonths1            ! saved month index
+  real(r8), private :: timwt(2)                 ! time weights for month 1 and month 2
+  real(r8), private, allocatable :: mlai2t(:,:) ! lai for interpolation (2 months)
+  real(r8), private, allocatable :: msai2t(:,:) ! sai for interpolation (2 months)
+  real(r8), private, allocatable :: mhvt2t(:,:) ! top vegetation height for interpolation (2 months)
+  real(r8), private, allocatable :: mhvb2t(:,:) ! bottom vegetation height for interpolation(2 months)
+  !-----------------------------------------------------------------------
 
-  character(len=*), parameter :: sourcefile = &
-       __FILE__
-
-!==============================================================================
 contains
-!==============================================================================
 
+  !-----------------------------------------------------------------------
+  !
+  ! lai_init
+  !
+  !-----------------------------------------------------------------------
+  subroutine lai_init(bounds)
+    !
+    ! Initialize data stream information for LAI.
+    !
+    !
+    ! !USES:
+    use shr_mpi_mod      , only : shr_mpi_bcast
+    use elm_nlUtilsMod   , only : find_nlgroup_name
+    use lnd_comp_shr     , only : mesh, model_clock
+    use dshr_strdata_mod , only : shr_strdata_init_from_inline
+    use controlMod       , only : NLFilename
+    use shr_stream_mod   , only : shr_stream_file_null
+    !
+    ! !ARGUMENTS:
+    implicit none
+    type(bounds_type), intent(in) :: bounds          ! bounds
+    !
+    ! !LOCAL VARIABLES:
+    integer                 :: i,n                        ! index
+    integer                 :: stream_year_first_lai      ! first year in Lai stream to use
+    integer                 :: stream_year_last_lai       ! last year in Lai stream to use
+    integer                 :: model_year_align_lai       ! align stream_year_first_lai with
+    integer                 :: nu_nml                     ! unit for namelist file
+    integer                 :: nml_error                  ! namelist i/o error flag
+    character(len=CL)       :: stream_fldFileName_lai     ! lai stream filename to read
+    character(len=CL)       :: stream_meshfile_lai        ! lai stream meshfile
+    character(len=CL)       :: lai_mapalgo = 'bilinear'   ! Mapping alogrithm
+    character(len=CL)       :: lai_tintalgo = 'linear'    ! Time interpolation alogrithm
+    integer                 :: lai_offset = 0             ! Offset in time for dataset (sec)
+    integer                 :: rc
+    character(*), parameter :: subName = "('laidyn_init')"
+    !-----------------------------------------------------------------------
+    !
+    ! deal with namelist variables here in init
+    !
+    namelist /lai_streams/         &
+         stream_year_first_lai,    &
+         stream_year_last_lai,     &
+         model_year_align_lai,     &
+         lai_mapalgo,              &
+         stream_fldFileName_lai,   &
+         stream_meshfile_lai,      &
+         lai_tintalgo
+
+    ! Default values for namelist
+    stream_year_first_lai     = 1      ! first year in stream to use
+    stream_year_last_lai      = 1      ! last  year in stream to use
+    model_year_align_lai      = 1      ! align stream_year_first_lai with this model year
+    stream_fldFileName_lai    = shr_stream_file_null
+    stream_meshfile_lai       = shr_stream_file_null 
+    do n = 1,numLaiFields
+       write(stream_varnames(n),'(a,i0)') laiString,n
+    end do
+
+    ! Read lai_streams namelist
+    if (masterproc) then
+       nu_nml = getavu()
+       open( nu_nml, file=trim(NLFilename), status='old', iostat=nml_error )
+       call find_nlgroup_name(nu_nml, 'lai_streams', status=nml_error)
+       if (nml_error == 0) then
+          read(nu_nml, nml=lai_streams,iostat=nml_error)
+          if (nml_error /= 0) then
+             call endrun(subname // ':: ERROR reading lai_streams namelist')
+          end if
+       else
+          call endrun(subname // ':: ERROR finding lai_streams namelist')
+       end if
+       close(nu_nml)
+       call relavu( nu_nml )
+    endif
+
+    call shr_mpi_bcast(stream_year_first_lai, mpicom)
+    call shr_mpi_bcast(stream_year_last_lai, mpicom)
+    call shr_mpi_bcast(model_year_align_lai, mpicom)
+    call shr_mpi_bcast(stream_fldFileName_lai, mpicom)
+    call shr_mpi_bcast(stream_meshfile_lai    , mpicom)
+    call shr_mpi_bcast(lai_tintalgo           , mpicom)
+
+    if (masterproc) then
+       write(iulog,*)
+       write(iulog,*) ' '
+       write(iulog,*) 'lai_stream settings:'
+       write(iulog,*) '  stream_year_first_lai  = ',stream_year_first_lai
+       write(iulog,*) '  stream_year_last_lai   = ',stream_year_last_lai
+       write(iulog,*) '  model_year_align_lai   = ',model_year_align_lai
+       write(iulog,*) '  stream_fldFileName_lai = ',trim(stream_fldFileName_lai)
+       write(iulog,*) '  stream_meshfile_lai    = ',trim(stream_meshfile_lai)
+       write(iulog,*) '  lai_tintalgo           = ',trim(lai_tintalgo)
+       do n = 1,numLaiFields
+          write(iulog,*) '  stream_varname         = ',trim(stream_varnames(n))
+       end do
+       write(iulog,*)
+    endif
+
+    ! Initialize the cdeps data type sdat_lai
+    call shr_strdata_init_from_inline(sdat_lai,                  &
+         my_task             = iam,                              &
+         logunit             = iulog,                            &
+         compname            = 'LND',                            &
+         model_clock         = model_clock,                      &
+         model_mesh          = mesh,                             &
+         stream_meshfile     = trim(stream_meshfile_lai),        &
+         stream_lev_dimname  = 'null',                           &
+         stream_mapalgo      = trim(lai_mapalgo),                &
+         stream_filenames    = (/trim(stream_fldfilename_lai)/), &
+         stream_fldlistFile  = stream_varnames,                  &
+         stream_fldListModel = stream_varnames,                  &
+         stream_yearFirst    = stream_year_first_lai,            &
+         stream_yearLast     = stream_year_last_lai,             &
+         stream_yearAlign    = model_year_align_lai,             &
+         stream_offset       = lai_offset,                       &
+         stream_taxmode      = 'cycle',                          &
+         stream_dtlimit      = 1.5_r8,                           &
+         stream_tintalgo     = lai_tintalgo,                     &
+         stream_name         = 'LAI data',                       &
+         rc                  = rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, line=__LINE__, file=__FILE__)) then
+       call ESMF_Finalize(endflag=ESMF_END_ABORT)
+    end if
+
+    if (masterproc) then
+       call shr_strdata_print(sdat_lai,'LAI data')
+    endif
+
+  end subroutine lai_init
+
+  !================================================================
+  subroutine lai_advance( bounds )
+    !
+    ! Advance LAI streams
+    !
+    ! !USES:
+    use clm_time_manager , only : get_curr_date
+    use dshr_strdata_mod , only : shr_strdata_advance
+    !
+    ! !ARGUMENTS:
+    type(bounds_type), intent(in)    :: bounds
+    !
+    ! !LOCAL VARIABLES:
+    integer :: g, ig   ! Indices
+    integer :: year    ! year (0, ...) for nstep+1
+    integer :: mon     ! month (1, ..., 12) for nstep+1
+    integer :: day     ! day of month (1, ..., 31) for nstep+1
+    integer :: sec     ! seconds into current date for nstep+1
+    integer :: mcdate  ! Current model date (yyyymmdd)
+    integer :: rc
+    !-----------------------------------------------------------------------
+
+    call get_curr_date(year, mon, day, sec)
+    mcdate = year*10000 + mon*100 + day
+    call shr_strdata_advance(sdat_lai, ymd=mcdate, tod=sec, logunit=iulog, istr='laidyn', rc=rc)
+    if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, line=__LINE__, file=__FILE__)) then
+       call ESMF_Finalize(endflag=ESMF_END_ABORT)
+    end if
+
+    if ( .not. allocated(g_to_ig) )then
+       allocate (g_to_ig(bounds%begg:bounds%endg) )
+       ig = 0
+       do g = bounds%begg,bounds%endg
+          ig = ig+1
+          g_to_ig(g) = ig
+       end do
+    end if
+
+  end subroutine lai_advance
+
+  !-----------------------------------------------------------------------
+  !
+  ! lai_interp
+  !
+  !-----------------------------------------------------------------------
+  subroutine lai_interp(bounds, canopystate_vars)
+    !
+    ! Interpolate data stream information for Lai.
+    !
+    ! !USES:
+    use pftvarcon        , only : noveg
+    use dshr_methods_mod , only : dshr_fldbun_getfldptr
+    !
+    ! !ARGUMENTS:
+    implicit none
+    type(bounds_type)      , intent(in)    :: bounds
+    type(canopystate_type) , intent(inout) :: canopystate_vars
+    !
+    ! !LOCAL VARIABLES:
+    integer           :: ivt, p, ip, ig, n, g
+    integer           :: lsize
+    integer           :: rc
+    real(r8), pointer :: dataptr1d(:)
+    real(r8), pointer :: dataptr2d(:,:)
+    !-----------------------------------------------------------------------
+
+    SHR_ASSERT_FL( (lbound(g_to_ig,1) <= bounds%begg ), sourcefile, __LINE__)
+    SHR_ASSERT_FL( (ubound(g_to_ig,1) >= bounds%endg ), sourcefile, __LINE__)
+
+    ! Get pointer for stream data that is time and spatially interpolate to model time and grid
+    ! Place all lai data from each type into a temporary 2d array
+    lsize = bounds%endg - bounds%begg + 1
+    allocate(dataptr2d(lsize, numLaiFields))
+    do n = 1,numLaiFields
+       call dshr_fldbun_getFldPtr(sdat_lai%pstrm(1)%fldbun_model, trim(stream_varnames(n)), &
+            fldptr1=dataptr1d,  rc=rc)
+       if (ESMF_LogFoundError(rcToCheck=rc, msg=ESMF_LOGERR_PASSTHRU, line=__LINE__, file=__FILE__)) then
+          call ESMF_Finalize(endflag=ESMF_END_ABORT)
+       end if
+       ! Note that the size of dataptr1d includes ocean points so it will be around 3x larger than lsize
+       ! So an explicit loop is required here
+       do g = 1,lsize
+          dataptr2d(g,n) = dataptr1d(g)
+       end do
+    end do
+
+    do p = bounds%begp, bounds%endp
+       ivt = veg_pp%itype(p)
+       ! Set lai for each gridcell/patch combination
+       if (ivt /= noveg) then
+          ! vegetated pft
+          ig = g_to_ig(veg_pp%gridcell(p))
+          canopystate_vars%tlai_patch(p) = dataptr2d(ig,ivt)
+       else
+          ! non-vegetated pft
+          canopystate_vars%tlai_patch(p) = 0._r8
+       endif
+    end do
+    deallocate(dataptr2d)
+
+  end subroutine lai_interp
+
+  !-----------------------------------------------------------------------
   subroutine SatellitePhenologyInit (bounds)
     !
     ! !DESCRIPTION:
@@ -65,15 +322,15 @@ contains
     InterpMonths1 = -999  ! saved month index
 
     ier = 0
-    if (.not.allocated(mlai2t)) then
+    if(.not.allocated(mlai2t)) then
        allocate (mlai2t(bounds%begp:bounds%endp,2), &
-                 msai2t(bounds%begp:bounds%endp,2), &
-                 mhvt2t(bounds%begp:bounds%endp,2), &
-                 mhvb2t(bounds%begp:bounds%endp,2), stat=ier)
+            msai2t(bounds%begp:bounds%endp,2), &
+            mhvt2t(bounds%begp:bounds%endp,2), &
+            mhvb2t(bounds%begp:bounds%endp,2), stat=ier)
     end if
     if (ier /= 0) then
        write(iulog,*) 'EcosystemDynini allocation error'
-       call endrun(msg=errMsg(sourcefile, __LINE__))
+       call endrun(msg=errMsg(__FILE__, __LINE__))
     end if
 
     mlai2t(bounds%begp : bounds%endp, :) = nan
@@ -87,28 +344,24 @@ contains
 
   end subroutine SatellitePhenologyInit
 
-  !================================================================
+  !-----------------------------------------------------------------------
   subroutine SatellitePhenology(bounds, num_filter, filter, &
-       waterdiagnosticbulk_inst, canopystate_inst)
+       waterstate_vars, canopystate_vars)
     !
     ! !DESCRIPTION:
     ! Ecosystem dynamics: phenology, vegetation
     ! Calculates leaf areas (tlai, elai),  stem areas (tsai, esai) and height (htop).
     !
     ! !USES:
-    use pftconMod               , only : noveg, nbrdlf_dcd_brl_shrub
-    use WaterDiagnosticBulkType , only : waterdiagnosticbulk_type
-    use CanopyStateType         , only : canopystate_type
-    use PatchType               , only : patch
-    use clm_varctl              , only : use_fates_sp
-
+    use pftvarcon,  only : noveg, nbrdlf_dcd_brl_shrub
+    use elm_varctl, only : use_fates_sp
     !
     ! !ARGUMENTS:
-    type(bounds_type)              , intent(in)    :: bounds
-    integer                        , intent(in)    :: num_filter                        ! number of column points in patch filter
-    integer                        , intent(in)    :: filter(bounds%endp-bounds%begp+1) ! patch filter points
-    type(waterdiagnosticbulk_type) , intent(in)    :: waterdiagnosticbulk_inst
-    type(canopystate_type)         , intent(inout) :: canopystate_inst
+    type(bounds_type)      , intent(in)    :: bounds
+    integer                , intent(in)    :: num_filter                        ! number of column points in filter
+    integer                , intent(in)    :: filter(bounds%endp-bounds%begp+1) ! patch filter
+    type(waterstate_type)  , intent(in)    :: waterstate_vars
+    type(canopystate_type) , intent(inout) :: canopystate_vars
     !
     ! !LOCAL VARIABLES:
     integer  :: fp,p,c                            ! indices
@@ -117,24 +370,24 @@ contains
     !-----------------------------------------------------------------------
 
     associate(                                                           &
-         frac_sno           => waterdiagnosticbulk_inst%frac_sno_col   , & ! Input:  [real(r8) (:) ] fraction of ground covered by snow (0 to 1)
-         snow_depth         => waterdiagnosticbulk_inst%snow_depth_col , & ! Input:  [real(r8) (:) ] snow height (m)
-         tlai               => canopystate_inst%tlai_patch    ,          & ! Output: [real(r8) (:) ] one-sided leaf area index, no burying by snow
-         tsai               => canopystate_inst%tsai_patch    ,          & ! Output: [real(r8) (:) ] one-sided stem area index, no burying by snow
-         elai               => canopystate_inst%elai_patch    ,          & ! Output: [real(r8) (:) ] one-sided leaf area index with burying by snow
-         esai               => canopystate_inst%esai_patch    ,          & ! Output: [real(r8) (:) ] one-sided stem area index with burying by snow
-         htop               => canopystate_inst%htop_patch    ,          & ! Output: [real(r8) (:) ] canopy top (m)
-         hbot               => canopystate_inst%hbot_patch    ,          & ! Output: [real(r8) (:) ] canopy bottom (m)
-         frac_veg_nosno_alb => canopystate_inst%frac_veg_nosno_alb_patch & ! Output: [integer  (:) ] fraction of vegetation not covered by snow (0 OR 1) [-]
+         frac_sno           => col_ws%frac_sno   ,          & ! Input:  [real(r8) (:) ] fraction of ground covered by snow (0 to 1)
+         snow_depth         => col_ws%snow_depth ,          & ! Input:  [real(r8) (:) ] snow height (m)
+         tlai               => canopystate_vars%tlai_patch    ,          & ! Output: [real(r8) (:) ] one-sided leaf area index, no burying by snow
+         tsai               => canopystate_vars%tsai_patch    ,          & ! Output: [real(r8) (:) ] one-sided stem area index, no burying by snow
+         elai               => canopystate_vars%elai_patch    ,          & ! Output: [real(r8) (:) ] one-sided leaf area index with burying by snow
+         esai               => canopystate_vars%esai_patch    ,          & ! Output: [real(r8) (:) ] one-sided stem area index with burying by snow
+         htop               => canopystate_vars%htop_patch    ,          & ! Output: [real(r8) (:) ] canopy top (m)
+         hbot               => canopystate_vars%hbot_patch    ,          & ! Output: [real(r8) (:) ] canopy bottom (m)
+         frac_veg_nosno_alb => canopystate_vars%frac_veg_nosno_alb_patch & ! Output: [integer  (:) ] fraction of vegetation not covered by snow (0 OR 1) [-]
          )
 
       if (use_lai_streams) then
-         call lai_interp(bounds, canopystate_inst)
+         call lai_interp(bounds, canopystate_vars)
       endif
 
       do fp = 1, num_filter
          p = filter(fp)
-         c = patch%column(p)
+         c = veg_pp%column(p)
 
          ! need to update elai and esai only every albedo time step so do not
          ! have any inconsistency in lai and sai between SurfaceAlbedo calls (i.e.,
@@ -164,57 +417,56 @@ contains
          ! are less than 0.05, set equal to zero to prevent numerical
          ! problems associated with very small lai and sai.
 
-         ! snow burial fraction for short vegetation (e.g. grasses, crops) changes with vegetation height
-         ! accounts for a 20% bending factor, as used in Lombardozzi et al. (2018) GRL 45(18), 9889-9897
+         ! snow burial fraction for short vegetation (e.g. grasses) as in
+         ! Wang and Zeng, 2007.
 
-         ! NOTE: The following snow burial code is duplicated in CNVegStructUpdateMod.
-         ! Changes in one place should be accompanied by similar changes in the other.
-
-         if (patch%itype(p) > noveg .and. patch%itype(p) <= nbrdlf_dcd_brl_shrub ) then
+         if (veg_pp%itype(p) > noveg .and. veg_pp%itype(p) <= nbrdlf_dcd_brl_shrub ) then
             ol = min( max(snow_depth(c)-hbot(p), 0._r8), htop(p)-hbot(p))
             fb = 1._r8 - ol / max(1.e-06_r8, htop(p)-hbot(p))
          else
-            fb = 1._r8 - (max(min(snow_depth(c),max(0.05,htop(p)*0.8_r8)),0._r8)/(max(0.05,htop(p)*0.8_r8)))
+            fb = 1._r8 - max(min(snow_depth(c),0.2_r8),0._r8)/0.2_r8   ! 0.2m is assumed
+            !depth of snow required for complete burial of grasses
          endif
 
          ! area weight by snow covered fraction
-         if(.not.use_fates_sp)then
+         if (.not.use_fates_sp) then
+            ! Do not set these in FATES_SP mode as they turn on the 'vegsol' filter and also
+            ! are duplicated by the FATES variables (in the FATES IFP indexing space)
 
-         ! Do not set these in FATES_SP mode as they turn on the 'vegsol' filter and also
-         ! are duplicated by the FATE variables (in the FATES IFP indexing space)
-           elai(p) = max(tlai(p)*(1.0_r8 - frac_sno(c)) + tlai(p)*fb*frac_sno(c), 0.0_r8)
-           esai(p) = max(tsai(p)*(1.0_r8 - frac_sno(c)) + tsai(p)*fb*frac_sno(c), 0.0_r8)
-           if (elai(p) < 0.05_r8) elai(p) = 0._r8
-           if (esai(p) < 0.05_r8) esai(p) = 0._r8
+            elai(p) = max(tlai(p)*(1.0_r8 - frac_sno(c)) + tlai(p)*fb*frac_sno(c), 0.0_r8)
+            esai(p) = max(tsai(p)*(1.0_r8 - frac_sno(c)) + tsai(p)*fb*frac_sno(c), 0.0_r8)
+            if (elai(p) < 0.05_r8) elai(p) = 0._r8
+            if (esai(p) < 0.05_r8) esai(p) = 0._r8
 
-           ! Fraction of vegetation free of snow
+            ! Fraction of vegetation free of snow
 
-           if ((elai(p) + esai(p)) >= 0.05_r8) then
-              frac_veg_nosno_alb(p) = 1
-           else
-              frac_veg_nosno_alb(p) = 0
-           end if
-         endif !fates_sp
+            if ((elai(p) + esai(p)) >= 0.05_r8) then
+               frac_veg_nosno_alb(p) = 1
+            else
+               frac_veg_nosno_alb(p) = 0
+            end if
+
+         end if
+
       end do ! end of patch loop
 
     end associate
 
   end subroutine SatellitePhenology
 
-  !==============================================================================
-  subroutine interpMonthlyVeg (bounds, canopystate_inst)
+  !-----------------------------------------------------------------------
+  subroutine interpMonthlyVeg (bounds, canopystate_vars)
     !
     ! !DESCRIPTION:
     ! Determine if 2 new months of data are to be read.
     !
     ! !USES:
-    use clm_varctl       , only : fsurdat
-    use clm_time_manager , only : get_curr_date, get_step_size_real, get_nstep
-    use CanopyStateType  , only : canopystate_type
+    use elm_varctl      , only : fsurdat
+    use clm_time_manager, only : get_curr_date, get_step_size, get_nstep
     !
     ! !ARGUMENTS:
-    type(bounds_type)      , intent(in)    :: bounds
-    type(canopystate_type) , intent(inout) :: canopystate_inst
+    type(bounds_type), intent(in) :: bounds
+    type(canopystate_type), intent(inout) :: canopystate_vars
     !
     ! !LOCAL VARIABLES:
     integer :: kyr         ! year (0, ...) for nstep+1
@@ -229,7 +481,7 @@ contains
          (/31,28,31,30,31,30,31,31,30,31,30,31/) !days per month
     !-----------------------------------------------------------------------
 
-    dtime = get_step_size_real()
+    dtime = get_step_size()
 
     call get_curr_date(kyr, kmo, kda, ksec, offset=int(dtime))
 
@@ -249,58 +501,58 @@ contains
           write(iulog,*) 'nstep = ',get_nstep(),' month = ',kmo,' day = ',kda
        end if
        call t_startf('readMonthlyVeg')
-       call readMonthlyVegetation (bounds, fsurdat, months, canopystate_inst)
+       call readMonthlyVegetation (bounds, fsurdat, months, canopystate_vars)
        InterpMonths1 = months(1)
        call t_stopf('readMonthlyVeg')
     end if
 
   end subroutine interpMonthlyVeg
 
-  !==============================================================================
-  subroutine readAnnualVegetation (bounds, canopystate_inst)
+  !-----------------------------------------------------------------------
+  subroutine readAnnualVegetation (bounds, canopystate_vars)
     !
     ! !DESCRIPTION:
     ! read 12 months of veg data for dry deposition
     !
     ! !USES:
-    use clm_varpar      , only : maxveg, maxsoil_patches
-    use pftconMod       , only : noveg
-    use fileutils       , only : getfil
-    use clm_varctl      , only : fsurdat
-    use domainMod       , only : ldomain
-    use clm_varcon      , only : grlnd
-    use PatchType       , only : patch
-    use CanopyStateType , only : canopystate_type
+    use elm_varpar  , only : numpft
+    use pftvarcon   , only : noveg
+    use domainMod   , only : ldomain
+    use fileutils   , only : getfil
+    use elm_varctl  , only : fsurdat
+    use shr_scam_mod, only : shr_scam_getCloseLatLon
     !
     ! !ARGUMENTS:
     type(bounds_type), intent(in) :: bounds
-    type(canopystate_type), intent(inout) :: canopystate_inst
+    type(canopystate_type), intent(inout) :: canopystate_vars
     !
     ! !LOCAL VARIABLES:
     type(file_desc_t) :: ncid             ! netcdf id
-    real(r8), pointer :: annlai(:,:)      ! 12 months of monthly lai from input data set
-    real(r8), pointer :: mlai(:,:)        ! lai read from input files
+    real(r8), pointer :: annlai(:,:)      ! 12 months of monthly lai from input data set 
+    real(r8), pointer :: mlai(:,:,:)        ! lai read from input files
+    real(r8):: closelat,closelon          ! single column vars
     integer :: ier                        ! error code
-    integer :: g,k,l,m,n,p                ! indices
+    integer :: g,k,l,m,n,p,t,ti,topi                ! indices
     integer :: ni,nj,ns                   ! indices
     integer :: dimid,varid                ! input netCDF id's
     integer :: ntim                       ! number of input data time samples
     integer :: nlon_i                     ! number of input data longitudes
     integer :: nlat_i                     ! number of input data latitudes
-    integer :: npft_i                     ! number of input data patch types
+    integer :: npft_i                     ! number of input data pft types
+    integer :: closelatidx,closelonidx    ! single column vars
     logical :: isgrid2d                   ! true => file is 2d
     character(len=256) :: locfn           ! local file name
     character(len=32) :: subname = 'readAnnualVegetation'
     !-----------------------------------------------------------------------
 
-    annlai    => canopystate_inst%annlai_patch
+    annlai    => canopystate_vars%annlai_patch
 
     ! Determine necessary indices
 
-    allocate(mlai(bounds%begg:bounds%endg,0:maxveg), stat=ier)
+    allocate(mlai(bounds%begg:bounds%endg,1:max_topounits, 0:numpft), stat=ier)
     if (ier /= 0) then
        write(iulog,*)subname, 'allocation error '
-       call endrun(msg=errMsg(sourcefile, __LINE__))
+       call endrun(msg=errMsg(__FILE__, __LINE__))
     end if
 
     if (masterproc) then
@@ -316,9 +568,14 @@ contains
        write(iulog,*)trim(subname), 'ldomain%ni,ni,= ',ldomain%ni,ni
        write(iulog,*)trim(subname), 'ldomain%nj,nj,= ',ldomain%nj,nj
        write(iulog,*)trim(subname), 'ldomain%ns,ns,= ',ldomain%ns,ns
-       call endrun(msg=errMsg(sourcefile, __LINE__))
+       call endrun(msg=errMsg(__FILE__, __LINE__))
     end if
-    call check_dim_size(ncid, 'lsmpft', maxsoil_patches)
+    call check_dim(ncid, 'lsmpft', numpft+1)
+
+    if (single_column) then
+       call shr_scam_getCloseLatLon(locfn, scmlat, scmlon, &
+            closelat, closelon, closelatidx, closelonidx)
+    endif
 
     do k=1,12   !! loop over months and read vegetated data
 
@@ -326,15 +583,18 @@ contains
             dim1name=grlnd, nt=k)
 
        !! only vegetated patches have nonzero values
-       !! Assign lai/sai/hgtt/hgtb to the top [maxsoil_patches] patches
+       !! Assign lai/sai/hgtt/hgtb to the top [maxpatch_pft] patches
        !! as determined in subroutine surfrd
 
        do p = bounds%begp,bounds%endp
-          g =patch%gridcell(p)
-          if (patch%itype(p) /= noveg) then     !! vegetated pft
-             do l = 0, maxveg
-                if (l == patch%itype(p)) then
-                   annlai(k,p) = mlai(g,l)
+          g =veg_pp%gridcell(p)
+          t = veg_pp%topounit(p)
+          topi = grc_pp%topi(g)
+          ti = t - topi + 1
+          if (veg_pp%itype(p) /= noveg) then     !! vegetated pft
+             do l = 0, numpft
+                if (l == veg_pp%itype(p)) then
+                   annlai(k,p) = mlai(g,ti,l)
                 end if
              end do
           else                       !! non-vegetated pft
@@ -350,99 +610,108 @@ contains
 
   endsubroutine readAnnualVegetation
 
-  !==============================================================================
-  subroutine readMonthlyVegetation (bounds, fveg, months, canopystate_inst)
+  !-----------------------------------------------------------------------
+  subroutine readMonthlyVegetation (bounds, &
+       fveg, months, canopystate_vars)
     !
     ! !DESCRIPTION:
     ! Read monthly vegetation data for two consec. months.
     !
     ! !USES:
-    use clm_varpar       , only : maxveg
-    use pftconMod        , only : noveg
+    use elm_varpar       , only : numpft
+    use pftvarcon        , only : noveg
     use fileutils        , only : getfil
     use spmdMod          , only : masterproc, mpicom, MPI_REAL8, MPI_INTEGER
+    use shr_scam_mod     , only : shr_scam_getCloseLatLon
     use clm_time_manager , only : get_nstep
-    use CanopyStateType  , only : canopystate_type
-    use PatchType        , only : patch
-    use clm_varcon       , only : grlnd
     use netcdf
     !
     ! !ARGUMENTS:
     type(bounds_type) , intent(in) :: bounds
     character(len=*)  , intent(in) :: fveg      ! file with monthly vegetation data
     integer           , intent(in) :: months(2) ! months to be interpolated (1 to 12)
-    type(canopystate_type), intent(inout) :: canopystate_inst
+    type(canopystate_type), intent(inout) :: canopystate_vars
     !
     ! !LOCAL VARIABLES:
     character(len=256) :: locfn           ! local file name
     type(file_desc_t)  :: ncid            ! netcdf id
-    integer :: g,n,k,l,m,p,ni,nj,ns       ! indices
+    integer :: g,n,k,l,m,p,ni,nj,ns,t,ti,topi       ! indices
     integer :: dimid,varid                ! input netCDF id's
     integer :: ntim                       ! number of input data time samples
     integer :: nlon_i                     ! number of input data longitudes
     integer :: nlat_i                     ! number of input data latitudes
-    integer :: npft_i                     ! number of input data patch types
+    integer :: npft_i                     ! number of input data pft types
     integer :: ier                        ! error code
+    integer :: closelatidx,closelonidx
+    real(r8):: closelat,closelon
     logical :: readvar
-    real(r8), pointer :: mlai(:,:)        ! lai read from input files
-    real(r8), pointer :: msai(:,:)        ! sai read from input files
-    real(r8), pointer :: mhgtt(:,:)       ! top vegetation height
-    real(r8), pointer :: mhgtb(:,:)       ! bottom vegetation height
+    real(r8), pointer :: mlai(:,:,:)        ! lai read from input files
+    real(r8), pointer :: msai(:,:,:)        ! sai read from input files
+    real(r8), pointer :: mhgtt(:,:,:)       ! top vegetation height
+    real(r8), pointer :: mhgtb(:,:,:)       ! bottom vegetation height
     character(len=32) :: subname = 'readMonthlyVegetation'
     !-----------------------------------------------------------------------
 
     ! Determine necessary indices
 
     allocate(&
-         mlai(bounds%begg:bounds%endg,0:maxveg), &
-         msai(bounds%begg:bounds%endg,0:maxveg), &
-         mhgtt(bounds%begg:bounds%endg,0:maxveg), &
-         mhgtb(bounds%begg:bounds%endg,0:maxveg), &
+         mlai(bounds%begg:bounds%endg,1:max_topounits,0:numpft), &
+         msai(bounds%begg:bounds%endg,1:max_topounits,0:numpft), &
+         mhgtt(bounds%begg:bounds%endg,1:max_topounits,0:numpft), &
+         mhgtb(bounds%begg:bounds%endg,1:max_topounits,0:numpft), &
          stat=ier)
     if (ier /= 0) then
        write(iulog,*)subname, 'allocation big error '
-       call endrun(msg=errMsg(sourcefile, __LINE__))
+       call endrun(msg=errMsg(__FILE__, __LINE__))
     end if
 
     ! ----------------------------------------------------------------------
     ! Open monthly vegetation file
-    ! Read data and convert from gridcell to patch data
+    ! Read data and convert from gridcell to pft data
     ! ----------------------------------------------------------------------
 
     call getfil(fveg, locfn, 0)
     call ncd_pio_openfile (ncid, trim(locfn), 0)
 
+    if (single_column) then
+       call shr_scam_getCloseLatLon (ncid, scmlat, scmlon, closelat, closelon,&
+            closelatidx, closelonidx)
+    endif
+
     do k=1,2   !loop over months and read vegetated data
 
        call ncd_io(ncid=ncid, varname='MONTHLY_LAI', flag='read', data=mlai, dim1name=grlnd, &
             nt=months(k), readvar=readvar)
-       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_LAI NOT on fveg file'//errMsg(sourcefile, __LINE__))
+       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_LAI NOT on fveg file'//errMsg(__FILE__, __LINE__))
 
        call ncd_io(ncid=ncid, varname='MONTHLY_SAI', flag='read', data=msai, dim1name=grlnd, &
             nt=months(k), readvar=readvar)
-       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_SAI NOT on fveg file'//errMsg(sourcefile, __LINE__))
+       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_SAI NOT on fveg file'//errMsg(__FILE__, __LINE__))
 
        call ncd_io(ncid=ncid, varname='MONTHLY_HEIGHT_TOP', flag='read', data=mhgtt, dim1name=grlnd, &
             nt=months(k), readvar=readvar)
-       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_HEIGHT_TOP NOT on fveg file'//errMsg(sourcefile, __LINE__))
+       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_HEIGHT_TOP NOT on fveg file'//errMsg(__FILE__, __LINE__))
 
        call ncd_io(ncid=ncid, varname='MONTHLY_HEIGHT_BOT', flag='read', data=mhgtb, dim1name=grlnd, &
             nt=months(k), readvar=readvar)
-       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_HEIGHT_TOP NOT on fveg file'//errMsg(sourcefile, __LINE__))
+       if (.not. readvar) call endrun(msg=' ERROR: MONTHLY_HEIGHT_TOP NOT on fveg file'//errMsg(__FILE__, __LINE__))
 
        ! Only vegetated patches have nonzero values
-       ! Assign lai/sai/hgtt/hgtb to the top [maxsoil_patches] patches
+       ! Assign lai/sai/hgtt/hgtb to the top [maxpatch_pft] patches
        ! as determined in subroutine surfrd
 
        do p = bounds%begp,bounds%endp
-          g =patch%gridcell(p)
-          if (patch%itype(p) /= noveg) then     ! vegetated pft
-             do l = 0, maxveg
-                if (l == patch%itype(p)) then
-                   mlai2t(p,k) = mlai(g,l)
-                   msai2t(p,k) = msai(g,l)
-                   mhvt2t(p,k) = mhgtt(g,l)
-                   mhvb2t(p,k) = mhgtb(g,l)
+          g =veg_pp%gridcell(p)
+          t = veg_pp%topounit(p)
+          topi = grc_pp%topi(g)
+          ti = t - topi + 1
+          if (veg_pp%itype(p) /= noveg) then     ! vegetated pft
+             do l = 0, numpft
+                if (l == veg_pp%itype(p)) then
+                   mlai2t(p,k) = mlai(g,ti,l)
+                   msai2t(p,k) = msai(g,ti,l)
+                   mhvt2t(p,k) = mhgtt(g,ti,l)
+                   mhvb2t(p,k) = mhgtb(g,ti,l)
                 end if
              end do
           else                        ! non-vegetated pft
@@ -467,7 +736,7 @@ contains
     deallocate(mlai, msai, mhgtt, mhgtb)
 
     do p = bounds%begp,bounds%endp
-       canopystate_inst%mlaidiff_patch(p) = mlai2t(p,1)-mlai2t(p,2)
+       canopystate_vars%mlaidiff_patch(p) = mlai2t(p,1)-mlai2t(p,2)
     enddo
 
   end subroutine readMonthlyVegetation

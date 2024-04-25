@@ -6,7 +6,7 @@ module IssueFixedMetadataHandler
   ! been fixed as of the writing of this file.
   !
   ! !USES:
-  use clm_varctl , only : iulog
+  use elm_varctl , only : iulog
   use abortutils , only : endrun
   use ncdio_pio  , only : file_desc_t, ncd_global
   use ncdio_pio  , only : ncd_putatt, ncd_getatt, check_att

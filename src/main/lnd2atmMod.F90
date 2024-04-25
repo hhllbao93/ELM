@@ -5,404 +5,435 @@ module lnd2atmMod
   ! Handle lnd2atm mapping
   !
   ! !USES:
-#include "shr_assert.h"
   use shr_kind_mod         , only : r8 => shr_kind_r8
-  use shr_infnan_mod       , only : nan => shr_infnan_nan, assignment(=)
+  use shr_log_mod            , only : errMsg => shr_log_errMsg
+  use abortutils             , only : endrun
   use shr_megan_mod        , only : shr_megan_mechcomps_n
-  use shr_fire_emis_mod    , only : shr_fire_emis_mechcomps_n
-  use clm_varpar           , only : numrad, ndst, nlevgrnd, nlevmaxurbgrnd !ndst = number of dust bins.
-  use clm_varcon           , only : rair, grav, cpair, hfus, tfrz, spval
-  use clm_varctl           , only : iulog, use_lch4
-  use shr_drydep_mod       , only : n_drydep
+  use elm_varpar           , only : numrad, ndst, nlevgrnd, nlevsno, nlevsoi !ndst = number of dust bins.
+  use elm_varcon           , only : rair, grav, cpair, hfus, tfrz, spval
+  use elm_varctl           , only : iulog, use_c13, use_cn, use_lch4, use_voc, use_fates, use_atm_downscaling_to_topunit
+  use elm_varctl           , only : use_lnd_rof_two_way
+!hh!  use tracer_varcon        , only : is_active_betr_bgc
+  use seq_drydep_mod   , only : n_drydep, drydep_method, DD_XLND
   use decompMod            , only : bounds_type
-  use subgridAveMod        , only : p2g, c2g
-  use filterColMod         , only : filter_col_type, col_filter_from_logical_array
+  use subgridAveMod        , only : p2g, c2g, p2t  
   use lnd2atmType          , only : lnd2atm_type
   use atm2lndType          , only : atm2lnd_type
-  use ch4Mod               , only : ch4_type
+  use CH4Mod               , only : ch4_type
   use DUSTMod              , only : dust_type
   use DryDepVelocity       , only : drydepvel_type
   use VocEmissionMod       , only : vocemis_type
-  use CNFireEmissionsMod   , only : fireemis_type
   use EnergyFluxType       , only : energyflux_type
-  use FrictionVelocityMod  , only : frictionvel_type
+  use FrictionVelocityType , only : frictionvel_type
   use SolarAbsorbedType    , only : solarabs_type
   use SurfaceAlbedoType    , only : surfalb_type
-  use TemperatureType      , only : temperature_type
-  use WaterFluxBulkType    , only : waterfluxbulk_type
-  use WaterType            , only : water_type
-  use glcBehaviorMod       , only : glc_behavior_type
-  use glc2lndMod           , only : glc2lnd_type
-  use ColumnType           , only : col
-  use LandunitType         , only : lun
-  use GridcellType         , only : grc
-  use landunit_varcon      , only : istice
+  use GridcellType         , only : grc_pp
+  use TopounitDataType     , only : top_es, top_af                 ! To calculate t_rad at topounit level needed in downscaling
+  use GridcellDataType     , only : grc_ef, grc_ws, grc_wf
+  use ColumnDataType       , only : col_ws, col_wf, col_cf, col_es
+  use VegetationDataType   , only : veg_es, veg_ef, veg_ws, veg_wf
+  use SoilHydrologyType    , only : soilhydrology_type 
+  use spmdmod          , only: masterproc
+  use elm_varctl     , only : iulog
   !
   ! !PUBLIC TYPES:
   implicit none
   private
+  save
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   public :: lnd2atm
   public :: lnd2atm_minimal
 
-  !
-  ! !PRIVATE MEMBER FUNCTIONS:
-  private :: handle_ice_runoff
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
+  integer, parameter :: unity = 0, urbanf = 1, urbans = 2
+  integer, parameter :: natveg = 3, veg =4, ice=5, nonurb=6, lake=7
   !------------------------------------------------------------------------
 
 contains
 
   !------------------------------------------------------------------------
   subroutine lnd2atm_minimal(bounds, &
-      water_inst, surfalb_inst, energyflux_inst, lnd2atm_inst)
+      surfalb_vars, energyflux_vars, lnd2atm_vars)
     !
     ! !DESCRIPTION:
-    ! Compute clm_l2a_inst component of gridcell derived type. This routine computes
+    ! Compute elm_l2a_vars component of gridcell derived type. This routine computes
     ! the bare minimum of components necessary to get the first step of a
     ! run started.
     !
     ! !USES:
-    use clm_varcon, only : sb
+      !$acc routine seq
+    use elm_varcon, only : sb
+
     !
     ! !ARGUMENTS:
     type(bounds_type)     , intent(in)    :: bounds
-    type(water_type)      , intent(inout) :: water_inst
-    type(surfalb_type)    , intent(in)    :: surfalb_inst
-    type(energyflux_type) , intent(in)    :: energyflux_inst
-    type(lnd2atm_type)    , intent(inout) :: lnd2atm_inst
+    type(surfalb_type)    , intent(in)    :: surfalb_vars
+    type(energyflux_type) , intent(in)    :: energyflux_vars
+    type(lnd2atm_type)    , intent(inout) :: lnd2atm_vars
     !
     ! !LOCAL VARIABLES:
-    integer  :: i,g                                   ! index
-    type(filter_col_type) :: filter_active_c          ! filter for active columns
-    real(r8) :: h2osno_total(bounds%begc:bounds%endc) ! total snow water (mm H2O)
-    real(r8), parameter :: amC   = 12.0_r8          ! Atomic mass number for Carbon
-    real(r8), parameter :: amO   = 16.0_r8          ! Atomic mass number for Oxygen
-    real(r8), parameter :: amCO2 = amC + 2.0_r8*amO ! Atomic mass number for CO2
-    ! The following converts g of C to kg of CO2
-    real(r8), parameter :: convertgC2kgCO2 = 1.0e-3_r8 * (amCO2/amC)
+    integer :: g, t                                    ! index
     !------------------------------------------------------------------------
+    associate( &
+      h2osno => col_ws%h2osno  , &
+      h2osno_grc => lnd2atm_vars%h2osno_grc , &
+      h2osoi_vol => col_ws%h2osoi_vol , &
+      h2osoi_vol_grc => lnd2atm_vars%h2osoi_vol_grc , &
+      albd_patch => surfalb_vars%albd_patch , &
+      albd_grc   => lnd2atm_vars%albd_grc   , &
+      albi_patch => surfalb_vars%albi_patch , &
+      albi_grc   => lnd2atm_vars%albi_grc   , &
+      eflx_lwrad_out => veg_ef%eflx_lwrad_out , &
+      eflx_lwrad_out_grc => lnd2atm_vars%eflx_lwrad_out_grc   &
+      )
 
-    ! TODO(wjs, 2019-06-12) We could use the standard allc filter for this. However,
-    ! currently lnd2atm_minimal is called from outside a clump loop, both in
-    ! initialization and in the driver loop (via the call to lnd2atm), and filters are
-    ! only available inside a clump loop. At a glance, it looks like these calls could be
-    ! put inside clump loops. But I want to look a little more carefully and/or do some
-    ! additional testing (e.g., writing coupler AVGHIST files for one test, and maybe
-    ! examining fields that are sent in initialization - and comparing these with
-    ! baselines) to help ensure I'm not breaking anything, before making this change. So
-    ! for now we build the necessary filters on the fly.
-    filter_active_c = col_filter_from_logical_array(bounds, &
-         col%active(bounds%begc:bounds%endc))
-
-    do i = water_inst%bulk_and_tracers_beg, water_inst%bulk_and_tracers_end
-       associate(bulk_or_tracer => water_inst%bulk_and_tracers(i))
-
-       call bulk_or_tracer%waterstate_inst%CalculateTotalH2osno( &
-            bounds, &
-            filter_active_c%num, &
-            filter_active_c%indices, &
-            caller = 'lnd2atm_minimal: '//water_inst%GetBulkOrTracerName(i), &
-            h2osno_total = h2osno_total(bounds%begc:bounds%endc))
-       call c2g(bounds, &
-            h2osno_total(bounds%begc:bounds%endc), &
-            bulk_or_tracer%waterlnd2atm_inst%h2osno_grc(bounds%begg:bounds%endg), &
-            c2l_scale_type= 'urbanf', l2g_scale_type='unity')
-
-       do g = bounds%begg,bounds%endg
-          bulk_or_tracer%waterlnd2atm_inst%h2osno_grc(g) = &
-               bulk_or_tracer%waterlnd2atm_inst%h2osno_grc(g)/1000._r8
-       end do
-       end associate
-    end do
-
-    call c2g(bounds, nlevmaxurbgrnd, &
-         water_inst%waterstatebulk_inst%h2osoi_vol_col (bounds%begc:bounds%endc, :), &
-         water_inst%waterlnd2atmbulk_inst%h2osoi_vol_grc    (bounds%begg:bounds%endg, :), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity')
-
-    call p2g(bounds, numrad, &
-         surfalb_inst%albd_patch (bounds%begp:bounds%endp, :), &
-         lnd2atm_inst%albd_grc   (bounds%begg:bounds%endg, :), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2g_scale_type='unity')
-
-    call p2g(bounds, numrad, &
-         surfalb_inst%albi_patch (bounds%begp:bounds%endp, :), &
-         lnd2atm_inst%albi_grc   (bounds%begg:bounds%endg, :), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2g_scale_type='unity')
-
-    call p2g(bounds, &
-         energyflux_inst%eflx_lwrad_out_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%eflx_lwrad_out_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2g_scale_type='unity')
+    call c2g(bounds, &
+         h2osno    (bounds%begc:bounds%endc) , &
+         h2osno_grc(bounds%begg:bounds%endg)    , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity)
 
     do g = bounds%begg,bounds%endg
-       lnd2atm_inst%t_rad_grc(g) = sqrt(sqrt(lnd2atm_inst%eflx_lwrad_out_grc(g)/sb))
+       h2osno_grc(g) = h2osno_grc(g)/1000._r8
     end do
+
+    call c2g(bounds, nlevgrnd, &
+         h2osoi_vol    (bounds%begc:bounds%endc,:), &
+         h2osoi_vol_grc(bounds%begg:bounds%endg,:)    , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity)
+
+    call p2g(bounds, numrad, &
+         albd_patch(bounds%begp:bounds%endp,:) , &
+         albd_grc  (bounds%begg:bounds%endg,:) , &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
+
+    call p2g(bounds, numrad, &
+         albi_patch(bounds%begp:bounds%endp,:) , &
+         albi_grc  (bounds%begg:bounds%endg,:) , &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
+
+    call p2g(bounds, &
+         eflx_lwrad_out     (bounds%begp:bounds%endp), &
+         eflx_lwrad_out_grc (bounds%begg:bounds%endg), &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
+
+    do g = bounds%begg,bounds%endg
+       lnd2atm_vars%t_rad_grc(g) = sqrt(sqrt(eflx_lwrad_out_grc(g)/sb))
+    end do
+    
+    ! Calculate topounit level eflx_lwrad_out_topo for downscaling purpose
+    if (use_atm_downscaling_to_topunit) then
+       call p2t(bounds, &
+            eflx_lwrad_out (bounds%begp:bounds%endp), &
+            top_es%eflx_lwrad_out_topo      (bounds%begt:bounds%endt), &
+            p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2t_scale_type='unity')
+    
+       do t = bounds%begt,bounds%endt
+          top_es%t_rad(t) = sqrt(sqrt(top_es%eflx_lwrad_out_topo(t)/sb))   
+       end do
+    end if
+    
+    end associate
 
   end subroutine lnd2atm_minimal
 
   !------------------------------------------------------------------------
   subroutine lnd2atm(bounds, &
-       atm2lnd_inst, surfalb_inst, temperature_inst, frictionvel_inst, &
-       water_inst, &
-       energyflux_inst, solarabs_inst, drydepvel_inst,  &
-       vocemis_inst, fireemis_inst, dust_inst, ch4_inst, glc_behavior, &
-       lnd2atm_inst, &
-       net_carbon_exchange_grc)
+       atm2lnd_vars, surfalb_vars, frictionvel_vars, &
+       energyflux_vars, &
+       solarabs_vars, drydepvel_vars, &
+       vocemis_vars, dust_vars, ch4_vars, soilhydrology_vars, lnd2atm_vars)
     !
     ! !DESCRIPTION:
-    ! Compute lnd2atm_inst component of gridcell derived type
+    ! Compute lnd2atm_vars component of gridcell derived type
     !
     ! !USES:
-    use ch4varcon  , only : ch4offline
+      !$acc routine seq
+    use CH4varcon  , only : ch4offline
     !
     ! !ARGUMENTS:
-    type(bounds_type)           , intent(in)    :: bounds
-    type(atm2lnd_type)          , intent(in)    :: atm2lnd_inst
-    type(surfalb_type)          , intent(in)    :: surfalb_inst
-    type(temperature_type)      , intent(in)    :: temperature_inst
-    type(frictionvel_type)      , intent(in)    :: frictionvel_inst
-    type(water_type)            , intent(inout) :: water_inst
-    type(energyflux_type)       , intent(in)    :: energyflux_inst
-    type(solarabs_type)         , intent(in)    :: solarabs_inst
-    type(drydepvel_type)        , intent(in)    :: drydepvel_inst
-    type(vocemis_type)          , intent(in)    :: vocemis_inst
-    type(fireemis_type)         , intent(in)    :: fireemis_inst
-    type(dust_type)             , intent(in)    :: dust_inst
-    type(ch4_type)              , intent(in)    :: ch4_inst
-    type(glc_behavior_type)     , intent(in)    :: glc_behavior
-    type(lnd2atm_type)          , intent(inout) :: lnd2atm_inst
-    real(r8)                    , intent(in)    :: net_carbon_exchange_grc( bounds%begg: )  ! net carbon exchange between land and atmosphere, positive for source (gC/m2/s)
+    type(bounds_type)      , intent(in)     :: bounds
+    type(atm2lnd_type)     , intent(in)     :: atm2lnd_vars
+    type(surfalb_type)     , intent(in)     :: surfalb_vars
+    type(frictionvel_type) , intent(in)     :: frictionvel_vars
+    type(energyflux_type)  , intent(in)     :: energyflux_vars
+    type(solarabs_type)    , intent(in)     :: solarabs_vars
+    type(drydepvel_type)   , intent(in)     :: drydepvel_vars
+    type(vocemis_type)     , intent(in)     :: vocemis_vars
+    type(dust_type)        , intent(in)     :: dust_vars
+    type(ch4_type)         , intent(in)     :: ch4_vars
+    type(soilhydrology_type), intent(in)    :: soilhydrology_vars
+    type(lnd2atm_type)     , intent(inout)  :: lnd2atm_vars
     !
     ! !LOCAL VARIABLES:
-    integer  :: c, g  ! indices
-    real(r8) :: eflx_sh_ice_to_liq_grc(bounds%begg:bounds%endg) ! sensible heat flux generated from the ice to liquid conversion, averaged to gridcell
+    integer :: g, lvl             ! index
     real(r8), parameter :: amC   = 12.0_r8 ! Atomic mass number for Carbon
     real(r8), parameter :: amO   = 16.0_r8 ! Atomic mass number for Oxygen
     real(r8), parameter :: amCO2 = amC + 2.0_r8*amO ! Atomic mass number for CO2
     ! The following converts g of C to kg of CO2
     real(r8), parameter :: convertgC2kgCO2 = 1.0e-3_r8 * (amCO2/amC)
     !------------------------------------------------------------------------
-
-    SHR_ASSERT_ALL_FL((ubound(net_carbon_exchange_grc) == (/bounds%endg/)), sourcefile, __LINE__)
-
-    call handle_ice_runoff(bounds, water_inst%waterfluxbulk_inst, glc_behavior, &
-         melt_non_icesheet_ice_runoff = lnd2atm_inst%params%melt_non_icesheet_ice_runoff, &
-         qflx_ice_runoff_col = water_inst%waterlnd2atmbulk_inst%qflx_ice_runoff_col(bounds%begc:bounds%endc), &
-         qflx_liq_from_ice_col = water_inst%waterlnd2atmbulk_inst%qflx_liq_from_ice_col(bounds%begc:bounds%endc), &
-         eflx_sh_ice_to_liq_col = lnd2atm_inst%eflx_sh_ice_to_liq_col(bounds%begc:bounds%endc))
-
+    associate( &
+      t_ref2m     => veg_es%t_ref2m , &
+      t_ref2m_grc => lnd2atm_vars%t_ref2m_grc       , &
+      q_ref2m     => veg_ws%q_ref2m , &
+      q_ref2m_grc => lnd2atm_vars%q_ref2m_grc      , &
+      u10_elm_patch => frictionvel_vars%u10_elm_patch , &
+      u_ref10m_grc => lnd2atm_vars%u_ref10m_grc      , &
+      taux     => veg_ef%taux , &
+      taux_grc => lnd2atm_vars%taux_grc      , &
+      tauy     => veg_ef%tauy , &
+      tauy_grc => lnd2atm_vars%tauy_grc      , &
+      qflx_evap_tot     => veg_wf%qflx_evap_tot , &
+      qflx_evap_tot_grc => lnd2atm_vars%qflx_evap_tot_grc     , &
+      fsa_patch => solarabs_vars%fsa_patch , &
+      fsa_grc   =>lnd2atm_vars%fsa_grc    , &
+      z0m_patch => frictionvel_vars%z0m_actual_patch, &
+      z0m_grc   => lnd2atm_vars%z0m_grc  , &
+      fv_patch  => frictionvel_vars%fv_patch , &
+      fv_grc    => lnd2atm_vars%fv_grc       , &
+      ram1_patch  => frictionvel_vars%ram1_patch , &
+      ram1_grc    => lnd2atm_vars%ram1_grc       , &
+      eflx_sh_tot => veg_ef%eflx_sh_tot , &
+      eflx_sh_tot_grc => lnd2atm_vars%eflx_sh_tot_grc      , &
+      eflx_lh_tot => veg_ef%eflx_lh_tot , &
+      eflx_lh_tot_grc => lnd2atm_vars%eflx_lh_tot_grc      , &
+      nee             => col_cf%nee, &
+      nee_grc         => lnd2atm_vars%nee_grc   , &
+      velocity_patch  => drydepvel_vars%velocity_patch , &
+      ddvel_grc       => lnd2atm_vars%ddvel_grc        , &
+      flx_mss_vrt_dst_patch => dust_vars%flx_mss_vrt_dst_patch, &
+      flxdst_grc      => lnd2atm_vars%flxdst_grc        , &
+      ch4_surf_flux_tot_col => ch4_vars%ch4_surf_flux_tot_col , &
+      flux_ch4_grc  => lnd2atm_vars%flux_ch4_grc      , &
+      qflx_runoff   => col_wf%qflx_runoff , &
+      qflx_rofliq_grc => lnd2atm_vars%qflx_rofliq_grc   , &
+      qflx_surf      => col_wf%qflx_surf , &
+      qflx_rofliq_qsur_grc  => lnd2atm_vars%qflx_rofliq_qsur_grc   , &
+      qflx_h2osfc_surf      => col_wf%qflx_h2osfc_surf , &
+      qflx_rofliq_qsurp_grc => lnd2atm_vars%qflx_rofliq_qsurp_grc  , &
+      qflx_irr_demand       => col_wf%qflx_irr_demand , &
+      qflx_irr_demand_grc   => lnd2atm_vars%qflx_irr_demand_grc   , &
+      qflx_drain            => col_wf%qflx_drain , &
+      qflx_rofliq_qsub_grc  => lnd2atm_vars%qflx_rofliq_qsub_grc   , &
+      qflx_drain_perched    => col_wf%qflx_drain_perched , &
+      qflx_rofliq_qsubp_grc => lnd2atm_vars%qflx_rofliq_qsubp_grc  , &
+      qflx_qrgwl            => col_wf%qflx_qrgwl                   , &
+      qflx_rofliq_qgwl_grc  => lnd2atm_vars%qflx_rofliq_qgwl_grc   , &
+      qflx_snwcp_ice        => col_wf%qflx_snwcp_ice,  &
+      qflx_rofice_grc       => lnd2atm_vars%qflx_rofice_grc     ,  &
+      endwb                 => col_ws%endwb , &
+      tws                   => grc_ws%tws   , &
+      t_grnd                => col_es%t_grnd , &
+      t_grnd_grc            => lnd2atm_vars%t_grnd_grc   , &
+      t_soisno              =>  col_es%t_soisno, &
+      t_soisno_grc          =>  lnd2atm_vars%t_soisno_grc, &
+      zwt_col          =>   soilhydrology_vars%zwt_col , &
+      zwt_grc          =>   lnd2atm_vars%zwt_grc,    &
+      coszen_col       => surfalb_vars%coszen_col , &
+      coszen_str       => lnd2atm_vars%coszen_str , &
+      qflx_h2orof_drain     => col_wf%qflx_h2orof_drain , &
+      qflx_h2orof_drain_grc => lnd2atm_vars%qflx_h2orof_drain_grc &
+      )
     !----------------------------------------------------
     ! lnd -> atm
     !----------------------------------------------------
 
     ! First, compute the "minimal" set of fields.
     call lnd2atm_minimal(bounds, &
-         water_inst, surfalb_inst, energyflux_inst, lnd2atm_inst)
+         surfalb_vars, energyflux_vars, lnd2atm_vars)
 
     call p2g(bounds, &
-         temperature_inst%t_ref2m_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%t_ref2m_grc       (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         t_ref2m    (bounds%begp:bounds%endp), &
+         t_ref2m_grc(bounds%begg:bounds%endg), &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         water_inst%waterdiagnosticbulk_inst%q_ref2m_patch (bounds%begp:bounds%endp), &
-         water_inst%waterlnd2atmbulk_inst%q_ref2m_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         q_ref2m    (bounds%begp:bounds%endp) , &
+         q_ref2m_grc(bounds%begg:bounds%endg)      , &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         frictionvel_inst%u10_clm_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%u_ref10m_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         u10_elm_patch(bounds%begp:bounds%endp) , &
+         u_ref10m_grc (bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         energyflux_inst%taux_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%taux_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         taux     (bounds%begp:bounds%endp), &
+         taux_grc (bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         energyflux_inst%tauy_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%tauy_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         tauy     (bounds%begp:bounds%endp)     , &
+         tauy_grc (bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         water_inst%waterfluxbulk_inst%qflx_evap_tot_patch (bounds%begp:bounds%endp), &
-         water_inst%waterlnd2atmbulk_inst%qflx_evap_tot_grc     (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2g_scale_type='unity')
+         qflx_evap_tot    (bounds%begp:bounds%endp)     , &
+         qflx_evap_tot_grc(bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         solarabs_inst%fsa_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%fsa_grc    (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2g_scale_type='unity')
+         fsa_patch(bounds%begp:bounds%endp) , &
+         fsa_grc  (bounds%begg:bounds%endg)  , &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         frictionvel_inst%z0m_actual_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%z0m_grc              (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbans', l2g_scale_type='unity')
+         z0m_patch(bounds%begp:bounds%endp), &
+         z0m_grc  (bounds%begg:bounds%endg), &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         frictionvel_inst%fv_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%fv_grc       (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         fv_patch(bounds%begp:bounds%endp) , &
+         fv_grc  (bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g(bounds, &
-         frictionvel_inst%ram1_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%ram1_grc       (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         ram1_patch(bounds%begp:bounds%endp) , &
+         ram1_grc  (bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
 
     call p2g( bounds, &
-         energyflux_inst%eflx_sh_tot_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%eflx_sh_tot_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity',c2l_scale_type='urbanf',l2g_scale_type='unity')
-    call c2g( bounds, &
-         energyflux_inst%eflx_sh_precip_conversion_col (bounds%begc:bounds%endc), &
-         lnd2atm_inst%eflx_sh_precip_conversion_grc    (bounds%begg:bounds%endg), &
-         c2l_scale_type='urbanf', l2g_scale_type='unity')
-    call c2g( bounds, &
-         lnd2atm_inst%eflx_sh_ice_to_liq_col(bounds%begc:bounds%endc), &
-         eflx_sh_ice_to_liq_grc(bounds%begg:bounds%endg), &
-         c2l_scale_type='urbanf', l2g_scale_type='unity')
+         eflx_sh_tot     (bounds%begp:bounds%endp) , &
+         eflx_sh_tot_grc (bounds%begg:bounds%endg)     , &
+         p2c_scale_type=unity,c2l_scale_type=urbanf,l2g_scale_type=unity)
+
     do g = bounds%begg, bounds%endg
-       lnd2atm_inst%eflx_sh_tot_grc(g) =  lnd2atm_inst%eflx_sh_tot_grc(g) + &
-            lnd2atm_inst%eflx_sh_precip_conversion_grc(g) + &
-            eflx_sh_ice_to_liq_grc(g) - &
-            energyflux_inst%eflx_dynbal_grc(g)
+       eflx_sh_tot_grc(g) =  eflx_sh_tot_grc(g) - grc_ef%eflx_dynbal(g)
     enddo
 
     call p2g(bounds, &
-         energyflux_inst%eflx_lh_tot_patch (bounds%begp:bounds%endp), &
-         lnd2atm_inst%eflx_lh_tot_grc      (bounds%begg:bounds%endg), &
-         p2c_scale_type='unity', c2l_scale_type= 'urbanf', l2g_scale_type='unity')
+         eflx_lh_tot    (bounds%begp:bounds%endp), &
+         eflx_lh_tot_grc(bounds%begg:bounds%endg)      , &
+         p2c_scale_type=unity, c2l_scale_type= urbanf, l2g_scale_type=unity)
 
-    do g = bounds%begg, bounds%endg
-       lnd2atm_inst%net_carbon_exchange_grc(g) = &
-            net_carbon_exchange_grc(g)
-    end do
-    if (use_lch4) then
-       if (.not. ch4offline) then
-          ! Adjust flux of CO2 by the net conversion of mineralizing C to CH4
-          do g = bounds%begg,bounds%endg
-             ! nem is in g C/m2/sec
-             lnd2atm_inst%net_carbon_exchange_grc(g) = &
-                  lnd2atm_inst%net_carbon_exchange_grc(g) + lnd2atm_inst%nem_grc(g)
-          end do
+    if (use_cn .or. use_fates) then
+       call c2g(bounds, &
+            nee    (bounds%begc:bounds%endc)   , &
+            nee_grc(bounds%begg:bounds%endg)   , &
+            c2l_scale_type= unity, l2g_scale_type=unity)
+
+       if (use_lch4) then
+          if (.not. ch4offline) then
+             ! Adjust flux of CO2 by the net conversion of mineralizing C to CH4
+             do g = bounds%begg,bounds%endg
+                ! nem is in g C/m2/sec
+                nee_grc(g) = nee_grc(g) + lnd2atm_vars%nem_grc(g)
+             end do
+          end if
        end if
+
+       ! Convert from gC/m2/s to kgCO2/m2/s
+       do g = bounds%begg,bounds%endg
+          nee_grc(g) = nee_grc(g)*convertgC2kgCO2
+       end do
+    else
+       do g = bounds%begg,bounds%endg
+          nee_grc(g) = 0._r8
+       end do
     end if
-    ! Convert from gC/m2/s to kgCO2/m2/s
-    do g = bounds%begg,bounds%endg
-       lnd2atm_inst%net_carbon_exchange_grc(g) = &
-            lnd2atm_inst%net_carbon_exchange_grc(g)*convertgC2kgCO2
-    end do
 
     ! drydepvel
-    if ( n_drydep > 0 ) then
+    if ( n_drydep > 0 .and. drydep_method == DD_XLND ) then
        call p2g(bounds, n_drydep, &
-            drydepvel_inst%velocity_patch (bounds%begp:bounds%endp, :), &
-            lnd2atm_inst%ddvel_grc        (bounds%begg:bounds%endg, :), &
-            p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+            velocity_patch(bounds%begp:bounds%endp,:) , &
+            ddvel_grc     (bounds%begg:bounds%endg,:)   , &
+            p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
     endif
 
     ! voc emission flux
-    if (shr_megan_mechcomps_n>0) then
+    if (use_voc .and. shr_megan_mechcomps_n>0) then
        call p2g(bounds, shr_megan_mechcomps_n, &
-            vocemis_inst%vocflx_patch(bounds%begp:bounds%endp,:), &
-            lnd2atm_inst%flxvoc_grc  (bounds%begg:bounds%endg,:), &
-            p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+            vocemis_vars%vocflx_patch, &
+            lnd2atm_vars%flxvoc_grc  , &
+            p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
     end if
-
-    ! fire emissions fluxes
-     if (shr_fire_emis_mechcomps_n>0) then
-        call p2g(bounds, shr_fire_emis_mechcomps_n, &
-            -fireemis_inst%fireflx_patch(bounds%begp:bounds%endp,:), &
-             lnd2atm_inst%fireflx_grc   (bounds%begg:bounds%endg,:), &
-             p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
-        call p2g(bounds, &
-             fireemis_inst%ztop_patch (bounds%begp:bounds%endp), &
-             lnd2atm_inst%fireztop_grc(bounds%begg:bounds%endg), &
-             p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
-     endif
 
     ! dust emission flux
     call p2g(bounds, ndst, &
-         dust_inst%flx_mss_vrt_dst_patch(bounds%begp:bounds%endp, :), &
-         lnd2atm_inst%flxdst_grc        (bounds%begg:bounds%endg, :), &
-         p2c_scale_type='unity', c2l_scale_type= 'unity', l2g_scale_type='unity')
+         flx_mss_vrt_dst_patch(bounds%begp:bounds%endp,:), &
+         flxdst_grc           (bounds%begg:bounds%endg,:), &
+         p2c_scale_type=unity, c2l_scale_type= unity, l2g_scale_type=unity)
+
+
+    ! ch4 flux
+!hh!    if (use_lch4 .and. (.not. is_active_betr_bgc)) then
+    if (use_lch4) then
+       call c2g( bounds,     &
+            ch4_surf_flux_tot_col(bounds%begc:bounds%endc) , &
+            flux_ch4_grc         (bounds%begg:bounds%endg) , &
+            c2l_scale_type= unity, l2g_scale_type=unity )
+    end if
 
     !----------------------------------------------------
     ! lnd -> rof
     !----------------------------------------------------
 
     call c2g( bounds, &
-         water_inst%waterfluxbulk_inst%qflx_surf_col (bounds%begc:bounds%endc), &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qsur_grc   (bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
-
-    call c2g( bounds, &
-         water_inst%waterfluxbulk_inst%qflx_drain_col (bounds%begc:bounds%endc), &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qsub_grc   (bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
-
-    do c = bounds%begc, bounds%endc
-       if (col%active(c)) then
-          ! It's not entirely appropriate to put qflx_liq_from_ice_col into
-          ! qflx_qrgwl_col, since this isn't necessarily just glaciers, wetlands and
-          ! lakes. But since we put the liquid portion of snow capping into
-          ! qflx_qrgwl_col, it seems reasonable to put qflx_liq_from_ice_col there as
-          ! well.
-          water_inst%waterfluxbulk_inst%qflx_qrgwl_col(c) = water_inst%waterfluxbulk_inst%qflx_qrgwl_col(c) + &
-               water_inst%waterlnd2atmbulk_inst%qflx_liq_from_ice_col(c)
-
-          ! qflx_runoff is the sum of a number of terms, including qflx_qrgwl. Since we
-          ! are adjusting qflx_qrgwl above, we need to adjust qflx_runoff analogously.
-          water_inst%waterfluxbulk_inst%qflx_runoff_col(c) = &
-            water_inst%waterfluxbulk_inst%qflx_runoff_col(c) + &
-            water_inst%waterlnd2atmbulk_inst%qflx_liq_from_ice_col(c)
-       end if
-    end do
-
-    call c2g( bounds, &
-         water_inst%waterfluxbulk_inst%qflx_qrgwl_col (bounds%begc:bounds%endc), &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qgwl_grc   (bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
-
-    call c2g( bounds, &
-         water_inst%waterfluxbulk_inst%qflx_runoff_col (bounds%begc:bounds%endc), &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_grc   (bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
+         qflx_runoff    (bounds%begc:bounds%endc) , &
+         qflx_rofliq_grc(bounds%begg:bounds%endg)  , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
 
     do g = bounds%begg, bounds%endg
-       water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qgwl_grc(g) = &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qgwl_grc(g) - &
-         water_inst%waterfluxbulk_inst%qflx_liq_dynbal_grc(g)
-       water_inst%waterlnd2atmbulk_inst%qflx_rofliq_grc(g) = &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_grc(g) - &
-         water_inst%waterfluxbulk_inst%qflx_liq_dynbal_grc(g)
+       qflx_rofliq_grc(g) = qflx_rofliq_grc(g) - grc_wf%qflx_liq_dynbal(g)
     enddo
 
     call c2g( bounds, &
-         water_inst%waterfluxbulk_inst%qflx_drain_perched_col (bounds%begc:bounds%endc), &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofliq_drain_perched_grc(bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
-
-
-    call c2g( bounds, &
-         water_inst%waterfluxbulk_inst%qflx_sfc_irrig_col (bounds%begc:bounds%endc), &
-         water_inst%waterlnd2atmbulk_inst%qirrig_grc(bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
+         qflx_surf           (bounds%begc:bounds%endc)   , &
+         qflx_rofliq_qsur_grc(bounds%begg:bounds%endg)   , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
 
     call c2g( bounds, &
-         water_inst%waterlnd2atmbulk_inst%qflx_ice_runoff_col(bounds%begc:bounds%endc),  &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofice_grc(bounds%begg:bounds%endg),  &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
+         qflx_h2osfc_surf     (bounds%begc:bounds%endc)  , &
+         qflx_rofliq_qsurp_grc(bounds%begg:bounds%endg)  , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
+
+    call c2g( bounds, &
+         qflx_irr_demand    (bounds%begc:bounds%endc)   , &
+         qflx_irr_demand_grc(bounds%begg:bounds%endg)   , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
+
+    call c2g( bounds, &
+         qflx_drain          (bounds%begc:bounds%endc)   , &
+         qflx_rofliq_qsub_grc(bounds%begg:bounds%endg)   , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
+
+    call c2g( bounds, &
+         qflx_drain_perched   (bounds%begc:bounds%endc)  , &
+         qflx_rofliq_qsubp_grc(bounds%begg:bounds%endg)  , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
+
+    call c2g( bounds, &
+         qflx_qrgwl          (bounds%begc:bounds%endc)         , &
+         qflx_rofliq_qgwl_grc(bounds%begg:bounds%endg)    , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
+
+    call c2g( bounds, &
+         qflx_snwcp_ice (bounds%begc:bounds%endc)     ,  &
+         qflx_rofice_grc(bounds%begg:bounds%endg)     ,  &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
+
+    call c2g(bounds,  &
+              coszen_col (bounds%begc:bounds%endc), &
+              coszen_str (bounds%begg:bounds%endg), &
+              c2l_scale_type= urbanf, l2g_scale_type=unity)
+
     do g = bounds%begg, bounds%endg
-       water_inst%waterlnd2atmbulk_inst%qflx_rofice_grc(g) = &
-         water_inst%waterlnd2atmbulk_inst%qflx_rofice_grc(g) - &
-         water_inst%waterfluxbulk_inst%qflx_ice_dynbal_grc(g)
+       qflx_rofice_grc(g) = qflx_rofice_grc(g) - grc_wf%qflx_ice_dynbal(g)
     enddo
+
+    ! land river two-way coupling
+    ! Average up  to gridcell for the inundation drainage
+    if (use_lnd_rof_two_way) then
+          call c2g( bounds, & 
+                     qflx_h2orof_drain(bounds%begc:bounds%endc)     , &
+                     qflx_h2orof_drain_grc(bounds%begg:bounds%endg) , &
+                     c2l_scale_type=unity,l2g_scale_type=unity )
+    endif
+
+    call c2g( bounds, &
+         col_ws%wslake_col(bounds%begc:bounds%endc), &
+         lnd2atm_vars%wslake_grc(bounds%begg:bounds%endg), &
+         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
 
     ! calculate total water storage for history files
     ! first set tws to gridcell total endwb
@@ -410,105 +441,128 @@ contains
     ! TODO - this was in BalanceCheckMod - not sure where it belongs?
 
     call c2g( bounds, &
-         water_inst%waterbalancebulk_inst%endwb_col(bounds%begc:bounds%endc), &
-         water_inst%waterdiagnosticbulk_inst%tws_grc(bounds%begg:bounds%endg), &
-         c2l_scale_type= 'urbanf', l2g_scale_type='unity' )
+         endwb(bounds%begc:bounds%endc) , &
+         tws  (bounds%begg:bounds%endg) , &
+         c2l_scale_type= urbanf, l2g_scale_type=unity )
     do g = bounds%begg, bounds%endg
-       water_inst%waterdiagnosticbulk_inst%tws_grc(g) = &
-         water_inst%waterdiagnosticbulk_inst%tws_grc(g) + &
-         water_inst%wateratm2lndbulk_inst%volr_grc(g) / grc%area(g) * 1.e-3_r8
+       tws(g) = tws(g) + atm2lnd_vars%volr_grc(g) / grc_pp%area(g) * 1.e-3_r8
     enddo
 
-  end subroutine lnd2atm
 
-  !-----------------------------------------------------------------------
-  subroutine handle_ice_runoff(bounds, waterfluxbulk_inst, glc_behavior, &
-       melt_non_icesheet_ice_runoff, &
-       qflx_ice_runoff_col, qflx_liq_from_ice_col, eflx_sh_ice_to_liq_col)
-    !
-    ! !DESCRIPTION:
-    ! Take column-level ice runoff and divide it between (a) ice runoff, and (b) liquid
-    ! runoff with a compensating negative sensible heat flux.
-    !
-    ! The rationale here is: Ice runoff is largely meant to represent a crude
-    ! parameterization of iceberg calving. Iceberg calving is mainly appropriate in
-    ! regions where an ice sheet terminates at the land-ocean boundary. Elsewhere, in
-    ! reality, we expect most ice runoff to flow downstream and melt before it reaches the
-    ! ocean. Furthermore, sending ice runoff directly to the ocean can lead to runaway sea
-    ! ice growth in some regions (around the Canadian archipelago, and possibly in more
-    ! wide-spread regions of the Arctic Ocean); melting this ice before it reaches the
-    ! ocean avoids this problem.
-    !
-    ! If the river model were able to melt ice, then we might not need this routine.
-    !
-    ! Note that this routine does NOT handle ice runoff generated via the dynamic
-    ! landunits adjustment fluxes (i.e., the fluxes that compensate for a difference in
-    ! ice content between the pre- and post-dynamic landunit areas). This is partly
-    ! because those gridcell-level dynamic landunits adjustment fluxes do not fit well
-    ! with this column-based infrastructure, and partly because either method of handling
-    ! these fluxes (i.e., sending an ice runoff or sending a liquid runoff with a
-    ! negative sensible heat flux) seems equally justifiable.
-    !
-    ! !USES:
-    !
-    ! !ARGUMENTS:
-    type(bounds_type), intent(in) :: bounds
-    type(waterfluxbulk_type), intent(in) :: waterfluxbulk_inst
-    type(glc_behavior_type), intent(in) :: glc_behavior
-    logical, intent(in) :: melt_non_icesheet_ice_runoff
-    real(r8), intent(out) :: qflx_ice_runoff_col( bounds%begc: ) ! total column-level ice runoff (mm H2O /s)
-    real(r8), intent(out) :: qflx_liq_from_ice_col( bounds%begc: ) ! liquid runoff from converted ice runoff (mm H2O /s)
-    real(r8), intent(out) :: eflx_sh_ice_to_liq_col( bounds%begc: ) ! sensible heat flux generated from the ice to liquid conversion (W/m2) (+ to atm)
+    call c2g( bounds, &
+         t_grnd    (bounds%begc:bounds%endc)   , &
+         t_grnd_grc(bounds%begg:bounds%endg)   , &
+         c2l_scale_type= urbans, l2g_scale_type=unity )
 
-    !
-    ! !LOCAL VARIABLES:
-    integer :: c, l, g
-    logical :: do_conversion
+    !do lvl = -nlevsno+1, nlevgrnd
+        call c2g( bounds, nlevgrnd+nlevsno, &
+            t_soisno    (bounds%begc:bounds%endc,:), &
+            t_soisno_grc(bounds%begg:bounds%endg,:), &
+            c2l_scale_type= urbans, l2g_scale_type=unity )
+    !enddo
 
-    character(len=*), parameter :: subname = 'handle_ice_runoff'
-    !-----------------------------------------------------------------------
+    call c2g( bounds, &
+         zwt_col(bounds%begc:bounds%endc)   , &
+         zwt_grc(bounds%begg:bounds%endg)   , &
+         c2l_scale_type= urbans, l2g_scale_type=unity )
 
-    SHR_ASSERT_ALL_FL((ubound(qflx_ice_runoff_col) == (/bounds%endc/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(qflx_liq_from_ice_col) == (/bounds%endc/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(eflx_sh_ice_to_liq_col) == (/bounds%endc/)), sourcefile, __LINE__)
-
-    do c = bounds%begc, bounds%endc
-       if (col%active(c)) then
-          qflx_ice_runoff_col(c) = waterfluxbulk_inst%qflx_ice_runoff_snwcp_col(c) + &
-               waterfluxbulk_inst%qflx_ice_runoff_xs_col(c)
-          qflx_liq_from_ice_col(c) = 0._r8
-          eflx_sh_ice_to_liq_col(c) = 0._r8
+    do g = bounds%begg,bounds%endg
+       ! TODO temperary treatment in case weird values after c2g
+       if(lnd2atm_vars%t_soisno_grc(g, 1) > 400._r8) then
+             write(iulog,*)'lnd2atm_vars%t_soisno_grc(g, 1) is',lnd2atm_vars%t_soisno_grc(g, 1)
+             call endrun( msg=' lnd2atm ERROR: lnd2atm_vars%t_soisno_grc >  400 Kelvin degree.'//errMsg(__FILE__, __LINE__))
        end if
+       lnd2atm_vars%Tqsur_grc(g) = avg_tsoil_surf(t_soisno_grc(g,:))
+       lnd2atm_vars%Tqsub_grc(g) = avg_tsoil(zwt_grc(g),t_soisno_grc(g,:))
+
     end do
 
-    if (melt_non_icesheet_ice_runoff) then
-       do c = bounds%begc, bounds%endc
-          if (col%active(c)) then
-             l = col%landunit(c)
-             g = col%gridcell(c)
-             do_conversion = .false.
-             if (lun%itype(l) /= istice) then
-                do_conversion = .true.
-             else  ! istice
-                if (glc_behavior%ice_runoff_melted_grc(g)) then
-                   do_conversion = .true.
-                else
-                   do_conversion = .false.
+    end associate
+  end subroutine lnd2atm
+
+
+    function avg_tsoil_surf(Tsoil_) result(avgT_)
+      !$acc routine seq
+    ! Function for estimating average soil temperature within the top few layers (which closely interacts with surface runoff)
+        implicit none
+        real(r8), intent(in) :: Tsoil_(-nlevsno+1:nlevgrnd)       ! water table depth, soil temperature
+        real(r8) :: avgT_             ! average soil temperature within the saturated layers
+
+        integer :: ilvl   !local index
+        real(r8) :: depth_(nlevsoi), h_layer(nlevsoi), sum_h, sum_ht
+
+        ! calculate the thickness of each 15 soil layer, refer to Eqn. (6.5) and (6.6) in CLM4.0 tech note
+        do ilvl = 1, nlevsoi
+            depth_(ilvl) = 0.025_r8*(EXP(0.5_r8*(REAL(ilvl)-0.5_r8))-1._r8)
+        enddo
+        h_layer(1) = 0.5_r8*(depth_(1)+depth_(2))
+        do ilvl = 2, nlevsoi-1
+            h_layer(ilvl) = 0.5_r8*(depth_(ilvl+1)-depth_(ilvl-1))
+        end do
+        h_layer(nlevsoi) = depth_(nlevsoi) - depth_(nlevsoi-1)
+
+        sum_h = 0._r8
+        sum_ht = 0._r8
+        do ilvl = 1, 3
+            sum_h = sum_h + h_layer(ilvl)
+            sum_ht = sum_ht + h_layer(ilvl)*Tsoil_(ilvl)
+        enddo
+        avgT_ = sum_ht/sum_h
+
+        return
+    end function avg_tsoil_surf
+
+    function avg_tsoil(zwt_, Tsoil_) result(avgT_)
+      !$acc routine seq
+    ! Function for estimating average soil temperature within the saturated soil zone (which produces subsurface runoff)
+        implicit none
+        real(r8), intent(in) :: zwt_, Tsoil_(-nlevsno+1:nlevgrnd)       ! water table depth, soil temperature
+        real(r8) :: avgT_             ! average soil temperature within the saturated layers
+
+        integer :: ilvl,izwt   !local index
+        real(r8) :: depth_(nlevsoi), h_layer(nlevsoi), sum_h, sum_ht
+
+        ! calculate the thickness of each 15 soil layer, refer to Eqn. (6.5) and (6.6) in CLM4.0 tech note
+        do ilvl = 1, nlevsoi
+            depth_(ilvl) = 0.025_r8*(EXP(0.5_r8*(REAL(ilvl)-0.5_r8))-1._r8)
+        enddo
+        h_layer(1) = 0.5_r8*(depth_(1)+depth_(2))
+        do ilvl = 2, nlevsoi-1
+            h_layer(ilvl) = 0.5_r8*(depth_(ilvl+1)-depth_(ilvl-1))
+        end do
+        h_layer(nlevsoi) = depth_(nlevsoi) - depth_(nlevsoi-1)
+
+        if(zwt_ <= 0._r8) then ! water table close to ground surface, average over the whole soil column
+            sum_h = 0._r8
+            sum_ht = 0._r8
+            do ilvl = 1, nlevsoi
+                sum_h = sum_h + h_layer(ilvl)
+                sum_ht = sum_ht + h_layer(ilvl)*Tsoil_(ilvl)
+            enddo
+            avgT_ = sum_ht/sum_h
+        else if(zwt_ >= depth_(nlevsoi)) then ! water table deeper than the total soil depth, taking the temperature of the deepes
+            avgT_ = Tsoil_(nlevsoi)
+        else
+            sum_h = 0._r8
+            sum_ht = 0._r8
+            ! find out which soil layer the water table is located
+            do ilvl = 1, nlevsoi
+                if(zwt_ <= depth_(ilvl)) then
+                    izwt = ilvl
+                    sum_h = depth_(ilvl) - zwt_
+                    sum_ht = (depth_(ilvl) - zwt_)*Tsoil_(ilvl)
+                    exit
                 end if
-             end if
-             if (do_conversion) then
-                ! ice to liquid absorbs energy, so results in a negative heat flux to atm
-                ! Note that qflx_ice_runoff_col is in mm H2O/s, which is the same as kg
-                ! m-2 s-1, so we can simply multiply by hfus.
-                eflx_sh_ice_to_liq_col(c) = -qflx_ice_runoff_col(c) * hfus
-                qflx_liq_from_ice_col(c) = qflx_ice_runoff_col(c)
-                qflx_ice_runoff_col(c) = 0._r8
-             end if
-          end if
-       end do
-    end if
+            enddo
+            ! calculate mean soil temperature of the total saturated soil zone
+            do ilvl = izwt + 1, nlevsoi
+                sum_h = sum_h + h_layer(ilvl)
+                sum_ht = sum_ht + h_layer(ilvl)*Tsoil_(ilvl)
+            enddo
+            avgT_ = sum_ht/sum_h
+        end if
 
-  end subroutine handle_ice_runoff
-
+        return
+    end function avg_tsoil
 
 end module lnd2atmMod

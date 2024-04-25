@@ -5,32 +5,71 @@ module restFileMod
   ! Reads from or writes to/ the CLM restart file.
   !
   ! !USES:
-#include "shr_assert.h"
-  use shr_kind_mod     , only : r8 => shr_kind_r8
-  use decompMod        , only : bounds_type, get_proc_clumps, get_clump_bounds
-  use decompMod        , only : bounds_level_proc
-  use spmdMod          , only : masterproc, mpicom
-  use abortutils       , only : endrun
-  use shr_log_mod      , only : errMsg => shr_log_errMsg
-  use clm_time_manager , only : timemgr_restart_io, get_nstep
-  use subgridRestMod   , only : subgridRestWrite, subgridRestRead, subgridRest_read_cleanup
-  use accumulMod       , only : accumulRest
-  use clm_instMod      , only : clm_instRest
-  use histFileMod      , only : hist_restart_ncd
-  use clm_varctl       , only : iulog, use_fates, use_hydrstress, compname
-  use clm_varctl       , only : create_crop_landunit, irrigate
-  use clm_varcon       , only : nameg, namel, namec, namep, nameCohort
-  use ncdio_pio        , only : file_desc_t, ncd_pio_createfile, ncd_pio_openfile, ncd_global
-  use ncdio_pio        , only : ncd_pio_closefile, ncd_defdim, ncd_putatt, ncd_enddef, check_dim_size
-  use ncdio_pio        , only : check_att, ncd_getatt
-  use ncdio_utils      , only : find_var_on_file
-  use glcBehaviorMod   , only : glc_behavior_type
-  use reweightMod      , only : reweight_wrapup
-  use IssueFixedMetadataHandler, only : write_issue_fixed_metadata, read_issue_fixed_metadata
+  use shr_kind_mod         , only : r8 => shr_kind_r8
+  use decompMod            , only : bounds_type
+  use spmdMod              , only : masterproc, mpicom
+  use abortutils           , only : endrun
+  use shr_log_mod          , only : errMsg => shr_log_errMsg
+  use clm_time_manager     , only : timemgr_restart_io, get_nstep
+  use subgridRestMod       , only : SubgridRest
+  use accumulMod           , only : accumulRest
+  use histFileMod          , only : hist_restart_ncd
+  use elm_varpar           , only : crop_prog
+!hh!  use elm_varctl           , only : use_cn, use_c13, use_c14, use_lch4, use_fates, use_betr
+  use elm_varctl           , only : use_cn, use_c13, use_c14, use_lch4, use_fates
+  use elm_varctl           , only : use_erosion
+  use elm_varctl           , only : create_glacier_mec_landunit, iulog 
+  use elm_varcon           , only : c13ratio, c14ratio
+  use elm_varcon           , only : nameg, namet, namel, namec, namep, nameCohort
+  use CH4Mod               , only : ch4_type
+  use CNStateType          , only : cnstate_type
+  
+
+  use ELMFatesInterfaceMod , only : hlm_fates_interface_type
+
+  use AerosolType          , only : aerosol_type
+  use CanopyStateType      , only : canopystate_type
+  use EnergyFluxType       , only : energyflux_type
+  use FrictionVelocityType , only : frictionvel_type
+  use LakeStateType        , only : lakestate_type
+  use PhotosynthesisType   , only : photosyns_type
+  use SedFluxType          , only : sedflux_type
+  use SoilHydrologyType    , only : soilhydrology_type  
+  use SoilStateType        , only : soilstate_type
+  use SolarAbsorbedType    , only : solarabs_type
+  use SurfaceAlbedoType    , only : surfalb_type
+  use atm2lndType          , only : atm2lnd_type
+  use lnd2atmType          , only : lnd2atm_type
+  use glc2lndMod           , only : glc2lnd_type
+  use lnd2glcMod           , only : lnd2glc_type
+!hh!  use BeTRTracerType       , only : BeTRTracer_Type    
+!hh!  use TracerStateType      , only : TracerState_type
+!hh!  use TracerFluxType       , only : TracerFlux_Type
+!hh!  use tracercoefftype      , only : tracercoeff_type
+  use ncdio_pio            , only : file_desc_t, ncd_pio_createfile, ncd_pio_openfile, ncd_global
+  use ncdio_pio            , only : ncd_pio_closefile, ncd_defdim, ncd_putatt, ncd_enddef, check_dim
+  use ncdio_pio            , only : check_att, ncd_getatt
+!hh!  use BeTRSimulationELM    , only : betr_simulation_elm_type
+  use CropType             , only : crop_type
+  use GridcellDataType     , only : grc_wf
+  use TopounitDataType     , only : top_es
+  use LandunitDataType     , only : lun_es, lun_ws
+  use ColumnDataType       , only : col_es, col_ef, col_ws, col_wf
+  use ColumnDataType       , only : col_cs, c13_col_cs, c14_col_cs
+  use ColumnDataType       , only : col_cf, c13_col_cf, c14_col_cf
+  use ColumnDataType       , only : col_ns, col_nf
+  use ColumnDataType       , only : col_ps, col_pf
+  use VegetationDataType   , only : veg_es, veg_ef, veg_ws, veg_wf
+  use VegetationDataType   , only : veg_cs, c13_veg_cs, c14_veg_cs
+  use VegetationDataType   , only : veg_cf, c13_veg_cf, c14_veg_cf
+  use VegetationDataType   , only : veg_ns, veg_nf
+  use VegetationDataType   , only : veg_ps, veg_pf
+  use GridcellDataType     , only : grc_cs, grc_ws 
+  
   !
   ! !PUBLIC TYPES:
   implicit none
-  private
+  save
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   public :: restFile_read
@@ -41,46 +80,67 @@ module restFileMod
   public :: restFile_filename        ! Sets restart filename
   !
   ! !PRIVATE MEMBER FUNCTIONS:
-  private :: restFile_set_derived       ! On a read, set variables derived from others
-  private :: restFile_read_pfile
+  private :: restFile_read_pfile     
   private :: restFile_write_pfile       ! Writes restart pointer file
   private :: restFile_closeRestart      ! Close restart file and write restart pointer file
   private :: restFile_dimset
-  private :: restFile_write_issues_fixed ! Write metadata for issues fixed
-  private :: restFile_read_issues_fixed ! Read and process metadata for issues fixed
-  private :: restFile_add_flag_metadata ! Add global metadata for some logical flag
   private :: restFile_add_ilun_metadata ! Add global metadata defining landunit types
   private :: restFile_add_icol_metadata ! Add global metadata defining column types
-  private :: restFile_add_ipft_metadata ! Add global metadata defining patch types
+  private :: restFile_add_ipft_metadata ! Add global metadata defining pft types
   private :: restFile_dimcheck
   private :: restFile_enddef
   private :: restFile_check_consistency   ! Perform consistency checks on the restart file
   private :: restFile_read_consistency_nl ! Read namelist associated with consistency checks
+  private :: restFile_check_fsurdat       ! Check consistency of fsurdat on the restart file
   private :: restFile_check_year          ! Check consistency of year on the restart file
   !
-  ! !PRIVATE TYPES:
-
-  ! Issue numbers for issue-fixed metadata
-  integer, parameter :: lake_dynbal_baseline_issue = 1140
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
+  ! !PRIVATE TYPES: None
+  private
   !-----------------------------------------------------------------------
 
 contains
 
   !-----------------------------------------------------------------------
-  subroutine restFile_write( bounds, file, writing_finidat_interp_dest_file, rdate, noptr)
+  subroutine restFile_write( bounds, file,                          &
+       atm2lnd_vars, aerosol_vars, canopystate_vars, cnstate_vars,  &
+       ch4_vars, energyflux_vars, frictionvel_vars, lakestate_vars, &
+       photosyns_vars, soilhydrology_vars,                          &
+       soilstate_vars, solarabs_vars, surfalb_vars,                 &
+!hh!       sedflux_vars, ep_betr, alm_fates, crop_vars,                 &
+       sedflux_vars, alm_fates, crop_vars,                 &
+       rdate, noptr)
     !
     ! !DESCRIPTION:
     ! Define/write CLM restart file.
     !
+    use WaterBudgetMod, only : WaterBudget_Restart
+    use CNPBudgetMod  , only : CNPBudget_Restart
+    use elm_varctl    , only : do_budgets, use_cn
+    !
+    implicit none
+    !
     ! !ARGUMENTS:
-    type(bounds_type) , intent(in)           :: bounds          
-    character(len=*)  , intent(in)           :: file  ! output netcdf restart file
-    logical           , intent(in)           :: writing_finidat_interp_dest_file ! true if we are writing a finidat_interp_dest file
-    character(len=*)  , intent(in), optional :: rdate ! restart file time stamp for name
-    logical           , intent(in), optional :: noptr ! if should NOT write to the restart pointer file
+    type(bounds_type)              , intent(in)    :: bounds          
+    character(len=*)               , intent(in)    :: file             ! output netcdf restart file
+    type(atm2lnd_type)             , intent(in)    :: atm2lnd_vars
+    type(aerosol_type)             , intent(in)    :: aerosol_vars
+    type(canopystate_type)         , intent(inout) :: canopystate_vars ! due to EDrest call
+    type(cnstate_type)             , intent(inout) :: cnstate_vars
+    type(ch4_type)                 , intent(in)    :: ch4_vars
+    type(energyflux_type)          , intent(in)    :: energyflux_vars
+    type(frictionvel_type)         , intent(inout) :: frictionvel_vars
+    type(lakestate_type)           , intent(in)    :: lakestate_vars
+    type(photosyns_type)           , intent(in)    :: photosyns_vars
+    type(sedflux_type)             , intent(in)    :: sedflux_vars
+    type(soilhydrology_type)       , intent(in)    :: soilhydrology_vars
+    type(soilstate_type)           , intent(inout) :: soilstate_vars
+    type(solarabs_type)            , intent(in)    :: solarabs_vars
+    type(surfalb_type)             , intent(in)    :: surfalb_vars
+!hh!    class(betr_simulation_elm_type), intent(inout):: ep_betr
+    type(hlm_fates_interface_type) , intent(inout) :: alm_fates
+    type(crop_type)                , intent(inout) :: crop_vars
+    character(len=*)               , intent(in), optional :: rdate     ! restart file time stamp for name
+    logical                        , intent(in), optional :: noptr     ! if should NOT write to the restart pointer file
     !
     ! !LOCAL VARIABLES:
     type(file_desc_t) :: ncid ! netcdf id
@@ -94,46 +154,286 @@ contains
        ptrfile = .true.
     end if
 
-    ! Open file
+    ! --------------------------------------------
+    ! Open restart file
+    ! --------------------------------------------
 
     call restFile_open( flag='write', file=file, ncid=ncid )
 
+    ! --------------------------------------------
     ! Define dimensions and variables
+    ! --------------------------------------------
 
     call restFile_dimset ( ncid )
 
+    ! Define restart file variables
+
     call timemgr_restart_io(ncid, flag='define')
 
-    call subgridRestWrite(bounds, ncid, flag='define' )
+    call SubgridRest(bounds, ncid, flag='define' )
 
     call accumulRest( ncid, flag='define' )
 
-    call clm_instRest(bounds, ncid, flag='define', &
-         writing_finidat_interp_dest_file=writing_finidat_interp_dest_file)
+    call atm2lnd_vars%restart (bounds, ncid, flag='define')
+
+    call canopystate_vars%restart (bounds, ncid, flag='define')
+
+    call energyflux_vars%restart (bounds, ncid, flag='define')
+
+    call col_ef%Restart (bounds, ncid, flag='define')
+
+    call veg_ef%Restart (bounds, ncid, flag='define')
+
+    call frictionvel_vars% restart (bounds, ncid, flag='define')
+
+    call lakestate_vars%restart (bounds, ncid, flag='define')
+
+    call photosyns_vars%restart (bounds, ncid, flag='define')
+
+    call soilhydrology_vars%restart (bounds, ncid, flag='define')
+
+    call soilstate_vars%restart (bounds, ncid, flag='define')
+
+    call solarabs_vars%restart (bounds, ncid, flag='define')
+    
+    call grc_wf%Restart (bounds, ncid, flag='define')
+
+    call col_wf%Restart (bounds, ncid, flag='define')
+    
+    call veg_wf%Restart (bounds, ncid, flag='define')
+
+    call top_es%Restart (bounds, ncid, flag='define')
+    
+    call lun_es%Restart (bounds, ncid, flag='define')
+
+    call col_es%Restart (bounds, ncid, flag='define')
+
+    call veg_es%Restart (bounds, ncid, flag='define')
+
+    
+    call grc_ws%Restart(bounds, ncid, flag='define')
+    
+    call lun_ws%Restart (bounds, ncid, flag='define')
+
+    call col_ws%Restart (bounds, ncid, flag='define', &
+         watsat_input=soilstate_vars%watsat_col(bounds%begc:bounds%endc,:))    
+
+    call veg_ws%Restart (bounds, ncid, flag='define')
+
+    if (use_erosion) then
+        call sedflux_vars%restart (bounds, ncid, flag='define')
+    end if
+
+    call aerosol_vars%restart (bounds, ncid,  flag='define', &
+         h2osoi_ice_col=col_ws%h2osoi_ice(bounds%begc:bounds%endc,:), &
+         h2osoi_liq_col=col_ws%h2osoi_liq(bounds%begc:bounds%endc,:))
+
+    call surfalb_vars%restart (bounds, ncid, flag='define', &
+         tlai_patch=canopystate_vars%tlai_patch(bounds%begp:bounds%endp), &
+         tsai_patch=canopystate_vars%tsai_patch(bounds%begp:bounds%endp))
+
+    if (use_lch4) then
+       call ch4_vars%restart(bounds, ncid, flag='define')
+    end if
+
+
+    if (use_cn .or. use_fates) then
+        call cnstate_vars%Restart(bounds, ncid, flag='define')
+        call col_cs%Restart(bounds, ncid, flag='define', carbon_type='c12', &
+              cnstate_vars=cnstate_vars)
+        call col_cf%Restart(bounds, ncid, flag='define')
+        call col_ns%Restart(bounds, ncid, flag='define', cnstate_vars=cnstate_vars)
+        call col_nf%Restart(bounds, ncid, flag='define')
+        call col_ps%Restart(bounds, ncid, flag='define', cnstate_vars=cnstate_vars)
+        call col_pf%Restart(bounds, ncid, flag='define')
+    end if
+    
+    if (use_cn) then
+       call veg_cs%Restart(bounds, ncid, flag='define', carbon_type='c12', &
+            cnstate_vars=cnstate_vars)
+       if (use_c13) then
+          call c13_col_cs%Restart(bounds, ncid, flag='define', carbon_type='c13', &
+               c12_carbonstate_vars=col_cs, cnstate_vars=cnstate_vars)
+          call c13_veg_cs%Restart(bounds, ncid, flag='define', carbon_type='c13', &
+               c12_veg_cs=veg_cs, cnstate_vars=cnstate_vars)
+       end if
+       if (use_c14) then
+          call c14_col_cs%restart(bounds, ncid, flag='define', carbon_type='c14', &
+               c12_carbonstate_vars=col_cs, cnstate_vars=cnstate_vars)
+          call c14_veg_cs%restart(bounds, ncid, flag='define', carbon_type='c14', &
+               c12_veg_cs=veg_cs, cnstate_vars=cnstate_vars)
+       end if
+       call veg_cf%Restart(bounds, ncid, flag='define')
+       call veg_ns%Restart(bounds, ncid, flag='define')
+       call veg_nf%Restart(bounds, ncid, flag='define')
+       call veg_ps%Restart(bounds, ncid, flag='define')
+       call veg_pf%Restart(bounds, ncid, flag='define')
+       call crop_vars%Restart(bounds, ncid, flag='define')
+
+       call grc_cs%Restart(bounds, ncid, flag='define')
+
+    end if
+
+
+    if (use_fates) then
+       call alm_fates%restart(bounds, ncid, flag='define',  &
+             canopystate_inst=canopystate_vars, &
+             frictionvel_inst=frictionvel_vars, &
+             soilstate_inst=soilstate_vars)
+    end if
+
+!hh!    if (use_betr) then
+!hh!       call ep_betr%BeTRRestart(bounds, ncid, flag='define')
+!hh!    endif
 
     if (present(rdate)) then 
        call hist_restart_ncd (bounds, ncid, flag='define', rdate=rdate )
     end if
 
-    call restFile_write_issues_fixed(ncid, &
-         writing_finidat_interp_dest_file = writing_finidat_interp_dest_file)
+    if (do_budgets) then
+       call WaterBudget_Restart(bounds, ncid, flag='define')
+       if (use_cn) then
+          call CNPBudget_Restart(bounds, ncid, flag='define')
+       endif
+    end if
 
     call restFile_enddef( ncid )
 
-    ! Write variables
+    ! --------------------------------------------
+    ! Write restart file variables
+    ! --------------------------------------------
     
     call timemgr_restart_io( ncid, flag='write' )
 
-    call subgridRestWrite(bounds, ncid, flag='write' )
+    call SubgridRest(bounds, ncid, flag='write' )
 
     call accumulRest( ncid, flag='write' )
 
-    call clm_instRest(bounds, ncid, flag='write', &
-         writing_finidat_interp_dest_file=writing_finidat_interp_dest_file)
+    call atm2lnd_vars%restart (bounds, ncid, flag='write')
+
+    call canopystate_vars%restart (bounds, ncid, flag='write')
+
+    call energyflux_vars%restart (bounds, ncid, flag='write')
+
+    call col_ef%Restart (bounds, ncid, flag='write')
+
+    call veg_ef%Restart (bounds, ncid, flag='write')
+
+    call frictionvel_vars% restart (bounds, ncid, flag='write')
+
+    call lakestate_vars%restart (bounds, ncid, flag='write')
+
+    call photosyns_vars%restart (bounds, ncid, flag='write')
+
+    call soilhydrology_vars%restart (bounds, ncid, flag='write')
+
+    call soilstate_vars%restart (bounds, ncid, flag='write')
+
+    call solarabs_vars%restart (bounds, ncid, flag='write')
+
+    call grc_wf%Restart (bounds, ncid, flag='write')
+
+    call col_wf%Restart (bounds, ncid, flag='write')
+
+    call veg_wf%Restart (bounds, ncid, flag='write')
+
+    call top_es%Restart (bounds, ncid, flag='write')
+
+    call lun_es%Restart (bounds, ncid, flag='write')
+
+    call col_es%Restart (bounds, ncid, flag='write')
+
+    call veg_es%Restart (bounds, ncid, flag='write')
+
+    call grc_ws%Restart(bounds, ncid, flag='write')
+    
+    call lun_ws%Restart (bounds, ncid, flag='write')
+
+    call col_ws%Restart (bounds, ncid, flag='write', &
+         watsat_input=soilstate_vars%watsat_col(bounds%begc:bounds%endc,:))
+    
+    call veg_ws%Restart (bounds, ncid, flag='write')
+
+    if (use_erosion) then
+        call sedflux_vars%restart (bounds, ncid, flag='write')
+    end if
+
+    call aerosol_vars%restart (bounds, ncid,  flag='write', &
+         h2osoi_ice_col=col_ws%h2osoi_ice(bounds%begc:bounds%endc,:), &
+         h2osoi_liq_col=col_ws%h2osoi_liq(bounds%begc:bounds%endc,:) )
+
+    call surfalb_vars%restart (bounds, ncid, flag='write',  &
+         tlai_patch=canopystate_vars%tlai_patch(bounds%begp:bounds%endp), &
+         tsai_patch=canopystate_vars%tsai_patch(bounds%begp:bounds%endp))
+
+    if (use_lch4) then
+       call ch4_vars%restart(  bounds, ncid, flag='write' )
+    end if
+
+    if (use_cn .or. use_fates) then
+        call cnstate_vars%Restart(bounds, ncid, flag='write')
+        call col_cs%restart(bounds, ncid, flag='write', &
+              carbon_type='c12', cnstate_vars=cnstate_vars)
+        call col_cf%Restart(bounds, ncid, flag='write')
+        call col_ns%Restart(bounds, ncid, flag='write', cnstate_vars=cnstate_vars)
+        call col_nf%Restart(bounds, ncid, flag='write')
+        call col_ps%Restart(bounds, ncid, flag='write', cnstate_vars=cnstate_vars)
+        call col_pf%Restart(bounds, ncid, flag='write')
+    end if
+   
+    if (use_cn) then
+       call veg_cs%restart(bounds, ncid, flag='write', &
+            carbon_type='c12', cnstate_vars=cnstate_vars)
+       if (use_c13) then
+          call c13_col_cs%restart(bounds, ncid, flag='write', &
+               c12_carbonstate_vars=col_cs, carbon_type='c13', &
+               cnstate_vars=cnstate_vars)
+          call c13_veg_cs%restart(bounds, ncid, flag='write', &
+               c12_veg_cs=veg_cs, carbon_type='c13', &
+               cnstate_vars=cnstate_vars)
+       end if
+       if (use_c14) then
+          call c14_col_cs%restart(bounds, ncid, flag='write', &
+               c12_carbonstate_vars=col_cs, carbon_type='c14', &
+               cnstate_vars=cnstate_vars )
+          call c14_veg_cs%restart(bounds, ncid, flag='write', &
+               c12_veg_cs=veg_cs, carbon_type='c14', &
+               cnstate_vars=cnstate_vars )
+       end if
+       call veg_cf%Restart(bounds, ncid, flag='write')
+       call veg_ns%Restart(bounds, ncid, flag='write')
+       call veg_nf%Restart(bounds, ncid, flag='write')
+       call veg_ps%Restart(bounds, ncid, flag='write')
+       call veg_pf%Restart(bounds, ncid, flag='write')
+       call crop_vars%Restart(bounds, ncid, flag='write')
+    end if
+
+
+
+    if (use_fates) then
+       call alm_fates%restart(bounds, ncid, flag='write',  &
+             canopystate_inst=canopystate_vars, &
+             frictionvel_inst=frictionvel_vars, &
+             soilstate_inst=soilstate_vars)
+
+    end if
+
+!hh!    if (use_betr) then
+!hh!       call ep_betr%BeTRRestart(bounds, ncid, flag='write')
+!hh!    endif
 
     call hist_restart_ncd (bounds, ncid, flag='write' )
 
-    ! Close file 
+    if (do_budgets) then
+       call WaterBudget_Restart(bounds, ncid, flag='write')
+       if (use_cn) then
+          call CNPBudget_Restart(bounds, ncid, flag='write')
+       endif
+    end if
+
+    ! --------------------------------------------
+    ! Close restart file and write restart pointer file
+    ! --------------------------------------------
     
     call restFile_close( ncid )
     call restFile_closeRestart( file )
@@ -145,44 +445,66 @@ contains
     ! Write out diagnostic info
 
     if (masterproc) then
-       write(iulog,'(a,i0)') 'Successfully wrote out restart data at nstep = ',get_nstep()
+       write(iulog,*) 'Successfully wrote out restart data at nstep = ',get_nstep()
        write(iulog,'(72a1)') ("-",i=1,60)
     end if
     
   end subroutine restFile_write
 
   !-----------------------------------------------------------------------
-  subroutine restFile_read( bounds_proc, file, glc_behavior, reset_dynbal_baselines_lake_columns )
+  subroutine restFile_read( bounds, file,                           &
+       atm2lnd_vars, aerosol_vars, canopystate_vars, cnstate_vars,  &
+       ch4_vars, energyflux_vars, frictionvel_vars, lakestate_vars, &
+       photosyns_vars, soilhydrology_vars,                          &
+       soilstate_vars, solarabs_vars, surfalb_vars,                 &
+!hh!       sedflux_vars, ep_betr,                                       &
+       sedflux_vars,                                       &
+       alm_fates, glc2lnd_vars, crop_vars)
     !
     ! !DESCRIPTION:
     ! Read a CLM restart file.
     !
+    ! !USES:
+    use subgridRestMod   , only : SubgridRest, subgridRest_read_cleanup
+    use accumulMod       , only : accumulRest
+    use histFileMod      , only : hist_restart_ncd
+    use glc2lndMod       , only : glc2lnd_type
+    use decompMod        , only : get_proc_clumps, get_clump_bounds
+    use decompMod        , only : bounds_type
+    use reweightMod      , only : reweight_wrapup
+    use WaterBudgetMod   , only : WaterBudget_Restart
+    use CNPBudgetMod     , only : CNPBudget_Restart
+    use elm_varctl       , only : do_budgets, use_cn
+    !
     ! !ARGUMENTS:
-    type(bounds_type) , intent(in) :: bounds_proc      ! processor-level bounds
-    character(len=*)  , intent(in) :: file             ! output netcdf restart file
-    type(glc_behavior_type), intent(in) :: glc_behavior
-
-    ! BACKWARDS_COMPATIBILITY(wjs, 2020-09-02) This is needed when reading old initial
-    ! conditions files created before https://github.com/ESCOMP/CTSM/issues/1140 was
-    ! resolved via https://github.com/ESCOMP/CTSM/pull/1109: The definition of total
-    ! column water content has been changed for lakes, so we need to reset baseline values
-    ! for lakes on older initial conditions files.
-    logical, intent(out) :: reset_dynbal_baselines_lake_columns
+    character(len=*)               , intent(in)    :: file  ! output netcdf restart file
+    type(bounds_type)              , intent(in)    :: bounds  
+    type(atm2lnd_type)             , intent(inout) :: atm2lnd_vars
+    type(aerosol_type)             , intent(inout) :: aerosol_vars
+    type(canopystate_type)         , intent(inout) :: canopystate_vars
+    type(cnstate_type)             , intent(inout) :: cnstate_vars
+    type(ch4_type)                 , intent(inout) :: ch4_vars
+    type(energyflux_type)          , intent(inout) :: energyflux_vars
+    type(frictionvel_type)         , intent(inout) :: frictionvel_vars
+    type(lakestate_type)           , intent(inout) :: lakestate_vars
+    type(photosyns_type)           , intent(inout) :: photosyns_vars
+    type(sedflux_type)             , intent(inout) :: sedflux_vars
+    type(soilhydrology_type)       , intent(inout) :: soilhydrology_vars
+    type(soilstate_type)           , intent(inout) :: soilstate_vars
+    type(solarabs_type)            , intent(inout) :: solarabs_vars
+    type(surfalb_type)             , intent(inout) :: surfalb_vars
+!hh!    class(betr_simulation_elm_type), intent(inout) :: ep_betr
+    type(hlm_fates_interface_type) , intent(inout) :: alm_fates
+    type(glc2lnd_type)             , intent(inout) :: glc2lnd_vars
+    type(crop_type)                , intent(inout) :: crop_vars
     !
     ! !LOCAL VARIABLES:
-    type(file_desc_t) :: ncid    ! netcdf id
-    integer           :: i       ! index
-    integer           :: nclumps ! number of clumps on this processor
-    integer           :: nc      ! clump index
-    type(bounds_type) :: bounds_clump
-
-    character(len=*), parameter :: subname = 'restFile_read'
+    type(file_desc_t) :: ncid         ! netcdf id
+    integer           :: nc
+    integer           :: i            ! index
+    integer           :: nclumps      ! number of clumps on this processor
+    type(bounds_type) :: bounds_clump ! clump-level bounds
     !-----------------------------------------------------------------------
-
-    ! The provided bounds need to be proc-level bounds. This is in part because of logic
-    ! below that divides this into clump-level bounds for the sake of reweight_wrapup.
-    ! But it *MAY* also be necessary to have proc-level bounds for these i/o routines.
-    SHR_ASSERT(bounds_proc%level == bounds_level_proc, subname // ': argument must be PROC-level bounds')
 
     ! Open file
 
@@ -192,7 +514,7 @@ contains
 
     call restFile_dimcheck( ncid )
 
-    call subgridRestRead(bounds_proc, ncid)
+    call SubgridRest(bounds, ncid, flag='read')
 
     ! Now that we have updated subgrid information, update the filters, active flags,
     ! etc. accordingly. We do these updates as soon as possible so that the updated
@@ -205,25 +527,135 @@ contains
     !$OMP PARALLEL DO PRIVATE (nc, bounds_clump)
     do nc = 1, nclumps
        call get_clump_bounds(nc, bounds_clump)
-       call reweight_wrapup(bounds_clump, glc_behavior)
+       call reweight_wrapup(bounds_clump, glc2lnd_vars%icemask_grc(bounds_clump%begg:bounds_clump%endg))
     end do
     !$OMP END PARALLEL DO
 
     call accumulRest( ncid, flag='read' )
 
-    call clm_instRest( bounds_proc, ncid, flag='read', &
-         writing_finidat_interp_dest_file=.false.)
+    call atm2lnd_vars%restart (bounds, ncid, flag='read')
 
-    call restFile_set_derived(bounds_proc, glc_behavior)
+    call canopystate_vars%restart (bounds, ncid, flag='read')
 
-    call hist_restart_ncd (bounds_proc, ncid, flag='read' )
+    call energyflux_vars%restart (bounds, ncid, flag='read')
 
-    call restFile_read_issues_fixed(ncid, &
-         reset_dynbal_baselines_lake_columns = reset_dynbal_baselines_lake_columns)
+    call col_ef%Restart (bounds, ncid, flag='read')
+
+    call veg_ef%Restart (bounds, ncid, flag='read')
+
+    call frictionvel_vars% restart (bounds, ncid, flag='read')
+
+    call lakestate_vars%restart (bounds, ncid, flag='read')
+
+    call photosyns_vars%restart (bounds, ncid, flag='read')
+
+    call soilhydrology_vars%restart (bounds, ncid, flag='read')
+
+    call soilstate_vars%restart (bounds, ncid, flag='read')
+
+    call solarabs_vars%restart (bounds, ncid, flag='read')
+
+    call grc_wf%Restart (bounds, ncid, flag='read')
+
+    call col_wf%Restart (bounds, ncid, flag='read')
+
+    call veg_wf%Restart (bounds, ncid, flag='read')
+
+    call top_es%Restart (bounds, ncid, flag='read')
+
+    call lun_es%Restart (bounds, ncid, flag='read')
+
+    call col_es%Restart (bounds, ncid, flag='read')
+
+    call veg_es%Restart (bounds, ncid, flag='read')
+
+    call grc_ws%Restart(bounds, ncid, flag='read')
+
+    call lun_ws%Restart (bounds, ncid, flag='read')
+
+    call col_ws%Restart (bounds, ncid, flag='read', &
+         watsat_input=soilstate_vars%watsat_col(bounds%begc:bounds%endc,:))
+
+    call veg_ws%Restart (bounds, ncid, flag='read')
+
+    if (use_erosion) then
+        call sedflux_vars%restart (bounds, ncid, flag='read')
+    end if
+
+    call aerosol_vars%restart (bounds, ncid, flag='read', &
+         h2osoi_ice_col=col_ws%h2osoi_ice(bounds%begc:bounds%endc,:), &
+         h2osoi_liq_col=col_ws%h2osoi_liq(bounds%begc:bounds%endc,:) ) 
+
+    call surfalb_vars%restart (bounds, ncid,  flag='read', &
+         tlai_patch=canopystate_vars%tlai_patch(bounds%begp:bounds%endp), &
+         tsai_patch=canopystate_vars%tsai_patch(bounds%begp:bounds%endp))
+
+    if (use_lch4) then
+       call ch4_vars%restart(  bounds, ncid, flag='read' )
+    end if
+
+    if (use_cn .or. use_fates) then
+        call cnstate_vars%Restart(bounds, ncid, flag='read')
+        call col_cs%restart(bounds, ncid, flag='read', &
+              carbon_type='c12', cnstate_vars=cnstate_vars)
+        call col_cf%Restart(bounds, ncid, flag='read')
+        call col_ns%Restart(bounds, ncid, flag='read', cnstate_vars=cnstate_vars)
+        call col_nf%Restart(bounds, ncid, flag='read')
+        call col_ps%Restart(bounds, ncid, flag='read', cnstate_vars=cnstate_vars)
+        call col_pf%Restart(bounds, ncid, flag='read')
+    end if
+   
+    if (use_cn) then
+       call veg_cs%restart(bounds, ncid, flag='read', &
+            carbon_type='c12', cnstate_vars=cnstate_vars)
+       if (use_c13) then
+          call c13_col_cs%restart(bounds, ncid, flag='read', &
+               c12_carbonstate_vars=col_cs, carbon_type='c13', &
+               cnstate_vars=cnstate_vars)
+          call c13_veg_cs%restart(bounds, ncid, flag='read', &
+               c12_veg_cs=veg_cs, carbon_type='c13', &
+               cnstate_vars=cnstate_vars)
+       end if
+       if (use_c14) then
+          call c14_col_cs%restart(bounds, ncid, flag='read', &
+               c12_carbonstate_vars=col_cs, carbon_type='c14', &
+               cnstate_vars=cnstate_vars)
+          call c14_veg_cs%restart(bounds, ncid, flag='read', &
+               c12_veg_cs=veg_cs, carbon_type='c14', &
+               cnstate_vars=cnstate_vars)
+       end if
+       call veg_cf%Restart(bounds, ncid, flag='read')
+       call veg_ns%Restart(bounds, ncid, flag='read')
+       call veg_nf%Restart(bounds, ncid, flag='read')
+       call veg_ps%Restart(bounds, ncid, flag='read')
+       call veg_pf%Restart(bounds, ncid, flag='read')
+       call crop_vars%Restart(bounds, ncid, flag='read')
+    end if
+
+    if (use_fates) then
+       call alm_fates%restart(bounds, ncid, flag='read',  &
+             canopystate_inst=canopystate_vars, &
+             frictionvel_inst=frictionvel_vars, &
+             soilstate_inst=soilstate_vars)
+    end if
+
+
+!hh!    if (use_betr) then
+!hh!       call ep_betr%BeTRRestart(bounds, ncid, flag='read')
+!hh!    endif
+        
+    call hist_restart_ncd (bounds, ncid, flag='read')
+
+    if (do_budgets) then
+       call WaterBudget_Restart(bounds, ncid, flag='read')
+       if (use_cn) then
+          call CNPBudget_Restart(bounds, ncid, flag='read')
+       endif
+    endif
 
     ! Do error checking on file
     
-    call restFile_check_consistency(bounds_proc, ncid)
+    call restFile_check_consistency(bounds, ncid)
 
     ! Close file 
 
@@ -247,8 +679,8 @@ contains
     ! Determine and obtain netcdf restart file
     !
     ! !USES:
-    use clm_varctl, only : caseid, nrevsn, nsrest, brnch_retain_casename
-    use clm_varctl, only : nsrContinue, nsrBranch
+    use elm_varctl, only : caseid, nrevsn, nsrest, brnch_retain_casename
+    use elm_varctl, only : nsrContinue, nsrBranch
     use fileutils , only : getfil
     !
     ! !ARGUMENTS:
@@ -283,8 +715,8 @@ contains
        end if
        call getfil( path, file, 0 )
 
-       ! tcraig, adding xx. and .compname makes this more robust
-       ctest = 'xx.'//trim(caseid)//'.'//trim(compname)
+       ! tcraig, adding xx. and .elm makes this more robust
+       ctest = 'xx.'//trim(caseid)//'.elm'
        ftest = 'xx.'//trim(file)
        status = index(trim(ftest),trim(ctest))
        if (status /= 0 .and. .not.(brnch_retain_casename)) then
@@ -296,39 +728,11 @@ contains
                   ' ctest = ',trim(ctest), &
                   ' ftest = ',trim(ftest)
           end if
-          call endrun(msg=errMsg(sourcefile, __LINE__)) 
+          call endrun(msg=errMsg(__FILE__, __LINE__)) 
        end if
     end if
 
   end subroutine restFile_getfile
-
-  !-----------------------------------------------------------------------
-  subroutine restFile_set_derived(bounds, glc_behavior)
-    !
-    ! !DESCRIPTION:
-    ! Upon a restart read, set variables that are not on the restart file, but can be
-    ! derived from variables that are on the restart file.
-    !
-    ! This should be called after variables are read from the restart file.
-    !
-    ! !USES:
-    !
-    ! NOTE(wjs, 2016-04-05) Is it an architectural violation to use topo_inst directly
-    ! here? I can't see a good way around it.
-    use clm_instMod, only : topo_inst
-    !
-    ! !ARGUMENTS:
-    type(bounds_type), intent(in) :: bounds
-    type(glc_behavior_type), intent(in) :: glc_behavior
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'restFile_set_derived'
-    !-----------------------------------------------------------------------
-
-    call glc_behavior%update_glc_classes(bounds, topo_inst%topo_col(bounds%begc:bounds%endc))
-
-  end subroutine restFile_set_derived
 
   !-----------------------------------------------------------------------
   subroutine restFile_read_pfile( pnamer )
@@ -338,7 +742,7 @@ contains
     !
     ! !USES:
     use fileutils , only : opnfil, getavu, relavu
-    use clm_varctl, only : rpntfil, rpntdir, inst_suffix
+    use elm_varctl, only : rpntfil, rpntdir, inst_suffix
     !
     ! !ARGUMENTS:
     character(len=*), intent(out) :: pnamer ! full path of restart file
@@ -381,6 +785,9 @@ contains
     ! Close restart file and write restart pointer file if
     ! in write mode, otherwise just close restart file if in read mode
     !
+    ! !USES:
+    use clm_time_manager, only : is_last_step
+    !
     ! !ARGUMENTS:
     character(len=*) , intent(in) :: file  ! local output filename
     !
@@ -397,7 +804,7 @@ contains
     !-----------------------------------------------------------------------
 
     if (masterproc) then
-       write(iulog,'(a)') 'Successfully wrote local restart file ',trim(file)
+       write(iulog,*) 'Successfully wrote local restart file ',trim(file)
        write(iulog,'(72a1)') ("-",i=1,60)
        write(iulog,*)
     end if
@@ -411,7 +818,7 @@ contains
     ! Open restart pointer file. Write names of current netcdf restart file.
     !
     ! !USES:
-    use clm_varctl, only : rpntdir, rpntfil, inst_suffix
+    use elm_varctl, only : rpntdir, rpntfil, inst_suffix
     use fileutils , only : relavu
     use fileutils , only : getavu, opnfil
     !
@@ -431,7 +838,7 @@ contains
 
        write(nio,'(a)') fnamer
        call relavu( nio )
-       write(iulog,'(a)')'Successfully wrote local restart pointer file'
+       write(iulog,*)'Successfully wrote local restart pointer file'
     end if
 
   end subroutine restFile_write_pfile
@@ -455,7 +862,8 @@ contains
 
        if (masterproc) then	
           write(iulog,*)
-          write(iulog,'(a,i0)')'restFile_open: writing restart dataset '//trim(file)//' at nstep = ',get_nstep()
+          write(iulog,*)'restFile_open: writing restart dataset at ',&
+               trim(file), ' at nstep = ',get_nstep()
           write(iulog,*)
        end if
        call ncd_pio_createfile(ncid, trim(file))
@@ -479,13 +887,13 @@ contains
     ! !DESCRIPTION:
     !
     ! !USES:
-    use clm_varctl, only : caseid, inst_suffix
+    use elm_varctl, only : caseid, inst_suffix
     !
     ! !ARGUMENTS:
     character(len=*), intent(in) :: rdate   ! input date for restart file name 
     !-----------------------------------------------------------------------
 
-    restFile_filename = "./"//trim(caseid)//"."//trim(compname)//trim(inst_suffix)//&
+    restFile_filename = "./"//trim(caseid)//".elm"//trim(inst_suffix)//&
          ".r."//trim(rdate)//".nc"
     if (masterproc) then
        write(iulog,*)'writing restart file ',trim(restFile_filename),' for model date = ',rdate
@@ -501,13 +909,15 @@ contains
     !
     ! !USES:
     use clm_time_manager     , only : get_nstep
-    use clm_varctl           , only : caseid, ctitle, version, username, hostname, fsurdat
-    use clm_varctl           , only : conventions, source
+    use elm_varctl           , only : caseid, ctitle, version, username, hostname, fsurdat
+    use elm_varctl           , only : conventions, source, use_hydrstress
+    use elm_varpar           , only : numrad, nlevlak, nlevsno, nlevgrnd, nlevurb, nlevcan, nlevtrc_full, nmonth, nvegwcs
+    use elm_varpar           , only : cft_lb, cft_ub, maxpatch_glcmec
     use dynSubgridControlMod , only : get_flanduse_timeseries
-    use clm_varpar           , only : numrad, nlevlak, nlevsno, nlevgrnd, nlevmaxurbgrnd, nlevcan
-    use clm_varpar           , only : maxpatch_glc, nvegwcs
-    use clm_varpar           , only : mxsowings, mxharvests
     use decompMod            , only : get_proc_global
+    use elm_varctl           , only : do_budgets
+    use WaterBudgetMod       , only : f_size, s_size, p_size
+    use CNPBudgetMod         , only : c_f_size, c_s_size, n_f_size, n_s_size, p_f_size, p_s_size
     !
     ! !ARGUMENTS:
     type(file_desc_t), intent(inout) :: ncid
@@ -515,6 +925,7 @@ contains
     ! !LOCAL VARIABLES:
     integer :: dimid               ! netCDF dimension id
     integer :: numg                ! total number of gridcells across all processors
+    integer :: numt                ! total number of topounits across all processors
     integer :: numl                ! total number of landunits across all processors
     integer :: numc                ! total number of columns across all processors
     integer :: nump                ! total number of pfts across all processors
@@ -527,31 +938,47 @@ contains
     character(len= 32) :: subname='restFile_dimset' ! subroutine name
     !------------------------------------------------------------------------
 
-    call get_proc_global(ng=numg, nl=numl, nc=numc, np=nump, nCohorts=numCohort)
+    call get_proc_global(ng=numg, nt=numt, nl=numl, nc=numc, np=nump, nCohorts=numCohort)
 
     ! Define dimensions
 
     call ncd_defdim(ncid , nameg      , numg           ,  dimid)
+    call ncd_defdim(ncid , namet      , numt           ,  dimid)
     call ncd_defdim(ncid , namel      , numl           ,  dimid)
     call ncd_defdim(ncid , namec      , numc           ,  dimid)
     call ncd_defdim(ncid , namep      , nump           ,  dimid)
     call ncd_defdim(ncid , nameCohort , numCohort      ,  dimid)
 
     call ncd_defdim(ncid , 'levgrnd' , nlevgrnd       ,  dimid)
-    call ncd_defdim(ncid , 'levmaxurbgrnd' , nlevmaxurbgrnd       ,  dimid)
+    call ncd_defdim(ncid , 'levurb'  , nlevurb        ,  dimid)
     call ncd_defdim(ncid , 'levlak'  , nlevlak        ,  dimid)
     call ncd_defdim(ncid , 'levsno'  , nlevsno        ,  dimid)
     call ncd_defdim(ncid , 'levsno1' , nlevsno+1      ,  dimid)
-    call ncd_defdim(ncid , 'levtot'  , nlevsno+nlevmaxurbgrnd, dimid)
+    call ncd_defdim(ncid , 'levtot'  , nlevsno+nlevgrnd, dimid)
     call ncd_defdim(ncid , 'numrad'  , numrad         ,  dimid)
     call ncd_defdim(ncid , 'levcan'  , nlevcan        ,  dimid)
-    call ncd_defdim(ncid , 'mxsowings' , mxsowings  ,  dimid)
-    call ncd_defdim(ncid , 'mxharvests' , mxharvests  ,  dimid)
     if ( use_hydrstress ) then
       call ncd_defdim(ncid , 'vegwcs'  , nvegwcs        ,  dimid)
     end if
-    call ncd_defdim(ncid , 'glc_nec', maxpatch_glc, dimid)
-    call ncd_defdim(ncid , 'glc_nec1', maxpatch_glc+1, dimid)
+    call ncd_defdim(ncid , 'string_length', 64        ,  dimid)
+    call ncd_defdim(ncid , 'levtrc'  , nlevtrc_full   ,  dimid)    
+    call ncd_defdim(ncid , 'month'   , nmonth         ,  dimid)
+    if (create_glacier_mec_landunit) then
+       call ncd_defdim(ncid , 'glc_nec', maxpatch_glcmec, dimid)
+    end if
+
+    if (do_budgets) then
+       call ncd_defdim(ncid , 'budg_flux' , f_size*p_size,  dimid)
+       call ncd_defdim(ncid , 'budg_state', s_size*p_size,  dimid)
+       if (use_cn) then
+          call ncd_defdim(ncid , 'C_budg_flux' , c_f_size*p_size,  dimid)
+          call ncd_defdim(ncid , 'C_budg_state', c_s_size*p_size,  dimid)
+          call ncd_defdim(ncid , 'N_budg_flux' , n_f_size*p_size,  dimid)
+          call ncd_defdim(ncid , 'N_budg_state', n_s_size*p_size,  dimid)
+          call ncd_defdim(ncid , 'P_budg_flux' , p_f_size*p_size,  dimid)
+          call ncd_defdim(ncid , 'P_budg_state', p_s_size*p_size,  dimid)
+       endif
+    end if
 
     ! Define global attributes
 
@@ -569,106 +996,18 @@ contains
     call ncd_putatt(ncid, NCD_GLOBAL, 'case_id'        , trim(caseid))
     call ncd_putatt(ncid, NCD_GLOBAL, 'surface_dataset', trim(fsurdat))
     call ncd_putatt(ncid, NCD_GLOBAL, 'flanduse_timeseries', trim(get_flanduse_timeseries()))
-    call ncd_putatt(ncid, NCD_GLOBAL, 'title', 'CLM Restart information')
-
-    call restFile_add_flag_metadata(ncid, create_crop_landunit, 'create_crop_landunit')
-    call restFile_add_flag_metadata(ncid, irrigate, 'irrigate')
-    ! BACKWARDS_COMPATIBILITY(wjs, 2017-12-13) created_glacier_mec_landunits is always
-    ! true now. However, we can't remove the read of this field from init_interp until we
-    ! can reliably assume that all initial conditions files that might be used in
-    ! init_interp have this flag .true. So until then, we write the flag with a
-    ! hard-coded .true. value.
-    call restFile_add_flag_metadata(ncid, .true., 'created_glacier_mec_landunits')
+    call ncd_putatt(ncid, NCD_GLOBAL, 'title', 'ELM Restart information')
+    if (create_glacier_mec_landunit) then
+       call ncd_putatt(ncid, ncd_global, 'created_glacier_mec_landunits', 'true')
+    else
+       call ncd_putatt(ncid, ncd_global, 'created_glacier_mec_landunits', 'false')
+    end if
 
     call restFile_add_ipft_metadata(ncid)
     call restFile_add_icol_metadata(ncid)
     call restFile_add_ilun_metadata(ncid)
 
   end subroutine restFile_dimset
-
-  !-----------------------------------------------------------------------
-  subroutine restFile_write_issues_fixed(ncid, writing_finidat_interp_dest_file)
-    !
-    ! !DESCRIPTION:
-    ! Write metadata for issues fixed
-    !
-    ! !ARGUMENTS:
-    type(file_desc_t), intent(inout) :: ncid ! local file id
-    logical          , intent(in)    :: writing_finidat_interp_dest_file ! true if we are writing a finidat_interp_dest file
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'restFile_write_issues_fixed'
-    !-----------------------------------------------------------------------
-
-    ! See comment associated with reset_dynbal_baselines_lake_columns in restFile_read
-    call write_issue_fixed_metadata( &
-         ncid = ncid, &
-         writing_finidat_interp_dest_file = writing_finidat_interp_dest_file, &
-         issue_num = lake_dynbal_baseline_issue)
-
-  end subroutine restFile_write_issues_fixed
-
-  !-----------------------------------------------------------------------
-  subroutine restFile_read_issues_fixed(ncid, reset_dynbal_baselines_lake_columns)
-    !
-    ! !DESCRIPTION:
-    ! Read and process metadata for issues fixed
-    !
-    ! !ARGUMENTS:
-    type(file_desc_t), intent(inout) :: ncid ! local file id
-    logical, intent(out) :: reset_dynbal_baselines_lake_columns ! see comment in restFile_read for details
-    !
-    ! !LOCAL VARIABLES:
-    integer :: attribute_value
-
-    character(len=*), parameter :: subname = 'restFile_read_issues_fixed'
-    !-----------------------------------------------------------------------
-
-    ! See comment associated with reset_dynbal_baselines_lake_columns in restFile_read
-    call read_issue_fixed_metadata( &
-         ncid = ncid, &
-         issue_num = lake_dynbal_baseline_issue, &
-         attribute_value = attribute_value)
-    if (attribute_value == 0) then
-       ! Old restart file, from before lake_dynbal_baseline_issue was resolved, so we
-       ! need to reset dynbal baselines for lake columns later in initialization.
-       reset_dynbal_baselines_lake_columns = .true.
-    else
-       ! Recent restart file, so no need to reset dynbal baselines for lake columns,
-       ! because they are already up to date.
-       reset_dynbal_baselines_lake_columns = .false.
-    end if
-
-  end subroutine restFile_read_issues_fixed
-
-
-  !-----------------------------------------------------------------------
-  subroutine restFile_add_flag_metadata(ncid, flag, flag_name)
-    !
-    ! !DESCRIPTION:
-    ! Add global metadata for some logical flag
-    !
-    ! !USES:
-    !
-    ! !ARGUMENTS:
-    type(file_desc_t), intent(inout) :: ncid ! local file id
-    logical          , intent(in)    :: flag ! logical flag
-    character(len=*) , intent(in)    :: flag_name ! name of netcdf attribute
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'restFile_add_flag_metadata'
-    !-----------------------------------------------------------------------
-
-    if (flag) then
-       call ncd_putatt(ncid, ncd_global, flag_name, 'true')
-    else
-       call ncd_putatt(ncid, ncd_global, flag_name, 'false')
-    end if
-
-  end subroutine restFile_add_flag_metadata
-
 
   !-----------------------------------------------------------------------
   subroutine restFile_add_ilun_metadata(ncid)
@@ -704,7 +1043,7 @@ contains
     ! Add global metadata defining column types
     !
     ! !USES:
-    use column_varcon, only : write_coltype_metadata
+    use column_varcon, only : icol_roof, icol_sunwall, icol_shadewall, icol_road_imperv, icol_road_perv
     !
     ! !ARGUMENTS:
     type(file_desc_t), intent(inout) :: ncid ! local file id
@@ -715,7 +1054,22 @@ contains
     character(len=*), parameter :: subname = 'restFile_add_icol_metadata'
     !-----------------------------------------------------------------------
     
-    call write_coltype_metadata(att_prefix, ncid)
+    ! Unlike ilun and ipft, the column names currently do not exist in column_varcon.
+    ! This is partly because of the trickiness of encoding column values for crop &
+    ! icemec.
+
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'vegetated_or_bare_soil', 1) 
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'crop'                  , 2) 
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'crop_noncompete'       , '2*100+m, m=cft_lb,cft_ub')
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'landice'               , 3) 
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'landice_multiple_elevation_classes', '4*100+m, m=1,glcnec')  
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'deep_lake'             , 5) 
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'wetland'               , 6) 
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_roof'            , icol_roof)
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_sunwall'         , icol_sunwall)
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_shadewall'       , icol_shadewall)
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_impervious_road' , icol_road_imperv)
+    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_pervious_road'   , icol_road_perv)
 
   end subroutine restFile_add_icol_metadata
 
@@ -723,17 +1077,18 @@ contains
   subroutine restFile_add_ipft_metadata(ncid)
     !
     ! !DESCRIPTION:
-    ! Add global metadata defining patch types
+    ! Add global metadata defining pft types
     !
     ! !USES:
-    use clm_varpar, only : natpft_lb, mxpft, cft_lb, cft_ub
-    use pftconMod , only : pftname_len, pftname
+    use elm_varpar, only : natpft_lb, mxpft, cft_lb, cft_ub, mxpft_nc
+    use pftvarcon , only : pftname_len, pftname
+    use elm_varctl,  only : use_crop
     !
     ! !ARGUMENTS:
     type(file_desc_t), intent(inout) :: ncid ! local file id
     !
     ! !LOCAL VARIABLES:
-    integer :: ptype  ! patch type
+    integer :: ptype  ! pft type
     character(len=*), parameter :: att_prefix = 'ipft_'   ! prefix for attributes
     character(len=len(att_prefix)+pftname_len) :: attname ! attribute name
 
@@ -741,6 +1096,7 @@ contains
     !-----------------------------------------------------------------------
     
     do ptype = natpft_lb, mxpft
+       if(.not. use_crop .and. ptype > mxpft_nc) EXIT ! exit the do loop
        attname = att_prefix // pftname(ptype)
        call ncd_putatt(ncid, ncd_global, attname, ptype)
     end do
@@ -758,55 +1114,37 @@ contains
     !
     ! !USES:
     use decompMod,  only : get_proc_global
-    use clm_varpar, only : nlevsno, nlevlak, nlevgrnd, nlevmaxurbgrnd
-    use clm_varctl, only : single_column, nsrest, nsrStartup
+    use elm_varpar, only : nlevsno, nlevlak, nlevgrnd, nlevurb
+    use elm_varctl, only : single_column, nsrest, nsrStartup
     !
     ! !ARGUMENTS:
     type(file_desc_t), intent(inout) :: ncid
     !
     ! !LOCAL VARIABLES:
     integer :: numg      ! total number of gridcells across all processors
+    integer :: numt      ! total number of topounits across all processors
     integer :: numl      ! total number of landunits across all processors
     integer :: numc      ! total number of columns across all processors
     integer :: nump      ! total number of pfts across all processors
     integer :: numCohort ! total number of cohorts across all processors
-    character(len=64) :: dimname
-    character(len=:), allocatable :: msg  ! diagnostic message
     character(len=32) :: subname='restFile_dimcheck' ! subroutine name
     !-----------------------------------------------------------------------
 
     ! Get relevant sizes
 
     if ( .not. single_column .or. nsrest /= nsrStartup )then
-       call get_proc_global(ng=numg, nl=numl, nc=numc, np=nump, nCohorts=numCohort)
-       msg = 'Did you mean to set use_init_interp = .true. in user_nl_clm?' // &
-            new_line('x') // &
-            '(Setting use_init_interp = .true. is needed when doing a' // &
-            new_line('x') // &
-            'transient run using an initial conditions file from a non-transient run,' // &
-            new_line('x') // &
-            'or a non-transient run using an initial conditions file from a transient run,' // &
-            new_line('x') // &
-            'or when running a resolution or configuration that differs from the initial conditions.)'
-       call check_dim_size(ncid, nameg, numg, msg=msg)
-       call check_dim_size(ncid, namel, numl, msg=msg)
-       call check_dim_size(ncid, namec, numc, msg=msg)
-       call check_dim_size(ncid, namep, nump, msg=msg)
-       if ( use_fates ) call check_dim_size(ncid, nameCohort  , numCohort, msg=msg)
+       call get_proc_global(ng=numg, nt=numt, nl=numl, nc=numc, np=nump, nCohorts=numCohort)
+       call check_dim(ncid, nameg, numg)
+       call check_dim(ncid, namet, numt)
+       call check_dim(ncid, namel, numl)
+       call check_dim(ncid, namec, numc)
+       call check_dim(ncid, namep, nump)
+       if ( use_fates ) call check_dim(ncid, nameCohort  , numCohort)
     end if
-    msg = 'You can deal with this mismatch by rerunning with ' // &
-         'use_init_interp = .true. in user_nl_clm and '// &
-         'remove the init_generated_files/ directory in your run directory'
-    call check_dim_size(ncid, 'levsno'  , nlevsno, msg=msg)
-    call check_dim_size(ncid, 'levgrnd' , nlevgrnd, msg=msg)
-    call check_dim_size(ncid, 'levlak'  , nlevlak)
-
-    ! BACKWARDS_COMPATIBILITY(wjs, 2020-10-27) The possibility of falling back on levgrnd
-    ! is needed for backwards compatibility with older restart files that do not have a
-    ! levmaxurbgrnd dimension. On these old restart files, we expect the levgrnd dimension
-    ! to give the implicit value of levmaxurbgrnd.
-    call find_var_on_file(ncid, 'levmaxurbgrnd:levgrnd', is_dim=.true., varname_on_file=dimname)
-    call check_dim_size(ncid, dimname, nlevmaxurbgrnd)
+    call check_dim(ncid, 'levsno'  , nlevsno)
+    call check_dim(ncid, 'levgrnd' , nlevgrnd)
+    call check_dim(ncid, 'levurb'  , nlevurb)
+    call check_dim(ncid, 'levlak'  , nlevlak) 
 
   end subroutine restFile_dimcheck
 
@@ -854,6 +1192,7 @@ contains
     type(file_desc_t), intent(inout) :: ncid    ! netcdf id
     !
     ! !LOCAL VARIABLES:
+    logical :: check_finidat_fsurdat_consistency ! whether to check consistency between fsurdat on finidat file and current fsurdat
     logical :: check_finidat_year_consistency    ! whether to check consistency between year on finidat file and current year
     logical :: check_finidat_pct_consistency     ! whether to check consistency between pct_pft on finidat file and surface dataset
     
@@ -861,8 +1200,13 @@ contains
     !-----------------------------------------------------------------------
     
     call restFile_read_consistency_nl( &
+         check_finidat_fsurdat_consistency, &
          check_finidat_year_consistency, &
          check_finidat_pct_consistency)
+
+    if (check_finidat_fsurdat_consistency) then
+       call restFile_check_fsurdat(ncid)
+    end if
 
     if (check_finidat_year_consistency) then
        call restFile_check_year(ncid)
@@ -876,6 +1220,7 @@ contains
 
   !-----------------------------------------------------------------------
   subroutine restFile_read_consistency_nl( &
+       check_finidat_fsurdat_consistency, &
        check_finidat_year_consistency, &
        check_finidat_pct_consistency)
 
@@ -885,11 +1230,12 @@ contains
     !
     ! !USES:
     use fileutils      , only : getavu, relavu
-    use clm_nlUtilsMod , only : find_nlgroup_name
+    use elm_nlUtilsMod , only : find_nlgroup_name
     use controlMod     , only : NLFilename
     use shr_mpi_mod    , only : shr_mpi_bcast
     !
     ! !ARGUMENTS:
+    logical, intent(out) :: check_finidat_fsurdat_consistency
     logical, intent(out) :: check_finidat_year_consistency
     logical, intent(out) :: check_finidat_pct_consistency
     !
@@ -901,10 +1247,12 @@ contains
     !-----------------------------------------------------------------------
 
     namelist /finidat_consistency_checks/ &
+         check_finidat_fsurdat_consistency, &
          check_finidat_year_consistency, &
          check_finidat_pct_consistency
 
     ! Set default namelist values
+    check_finidat_fsurdat_consistency = .true.
     check_finidat_year_consistency = .true.
     check_finidat_pct_consistency = .true.
 
@@ -916,15 +1264,14 @@ contains
        if (nml_error == 0) then
           read(nu_nml, nml=finidat_consistency_checks,iostat=nml_error)
           if (nml_error /= 0) then
-             call endrun(msg='ERROR reading finidat_consistency_checks namelist'//errMsg(sourcefile, __LINE__))
+             call endrun(msg='ERROR reading finidat_consistency_checks namelist'//errMsg(__FILE__, __LINE__))
           end if
-       else
-          call endrun(msg='ERROR finding finidat_consistency_checks namelist'//errMsg(sourcefile, __LINE__))
        end if
        close(nu_nml)
        call relavu( nu_nml )
     endif
 
+    call shr_mpi_bcast (check_finidat_fsurdat_consistency, mpicom)
     call shr_mpi_bcast (check_finidat_year_consistency, mpicom)
     call shr_mpi_bcast (check_finidat_pct_consistency, mpicom)
 
@@ -938,6 +1285,64 @@ contains
   end subroutine restFile_read_consistency_nl
 
   !-----------------------------------------------------------------------
+  subroutine restFile_check_fsurdat(ncid)
+    !
+    ! !DESCRIPTION:
+    ! Check consistency of the fsurdat value on the restart file and the current fsurdat
+    !
+    ! !USES:
+    use fileutils            , only : get_filename
+    use elm_varctl           , only : fname_len, fsurdat
+    use dynSubgridControlMod , only : get_flanduse_timeseries
+    !
+    ! !ARGUMENTS:
+    type(file_desc_t), intent(inout) :: ncid    ! netcdf id
+    !
+    ! !LOCAL VARIABLES:
+    character(len=fname_len) :: fsurdat_rest  ! fsurdat from the restart file (includes full path)
+    character(len=fname_len) :: filename_cur  ! current fsurdat file name
+    character(len=fname_len) :: filename_rest ! fsurdat file name from restart file (does NOT include full path)
+    
+    character(len=*), parameter :: subname = 'restFile_check_fsurdat'
+    !-----------------------------------------------------------------------
+    
+    ! Only do this check for a transient run. The problem with doing this check for a non-
+    ! transient run is the transition from transient to non-transient: It is legitimate to
+    ! run with an 1850 surface dataset and a pftdyn file, then use the restart file from
+    ! that run to start a present-day (non-transient) run, which would use a 2000 surface
+    ! dataset.
+    if (get_flanduse_timeseries() /= ' ') then
+       call ncd_getatt(ncid, NCD_GLOBAL, 'surface_dataset', fsurdat_rest)
+
+       ! Compare file names, ignoring path
+       filename_cur = get_filename(fsurdat)
+       filename_rest = get_filename(fsurdat_rest)
+
+       if (filename_rest /= filename_cur) then
+          if (masterproc) then
+             write(iulog,*) 'ERROR: Initial conditions file (finidat) was generated from a different surface dataset'
+             write(iulog,*) 'than the one being used for the current simulation (fsurdat).'
+             write(iulog,*) 'Current fsurdat: ', trim(filename_cur)
+             write(iulog,*) 'Surface dataset used to generate initial conditions file: ', trim(filename_rest)
+             write(iulog,*)
+             write(iulog,*) 'Possible solutions to this problem:'
+             write(iulog,*) '(1) Make sure you are using the correct surface dataset and initial conditions file'
+             write(iulog,*) '(2) If you generated the surface dataset and/or initial conditions file yourself,'
+             write(iulog,*) '    then you may need to manually change the surface_dataset global attribute on the'
+             write(iulog,*) '    initial conditions file (e.g., using ncatted)'
+             write(iulog,*) '(3) If you are confident that you are using the correct surface dataset and initial conditions file,'
+             write(iulog,*) '    yet are still experiencing this error, then you can bypass this check by setting:'
+             write(iulog,*) '      check_finidat_fsurdat_consistency = .false.'
+             write(iulog,*) '    in user_nl_elm'
+             write(iulog,*) ' '
+          end if
+          call endrun(msg=errMsg(__FILE__, __LINE__))
+       end if
+    end if
+
+  end subroutine restFile_check_fsurdat
+
+  !-----------------------------------------------------------------------
   subroutine restFile_check_year(ncid)
     !
     ! !DESCRIPTION:
@@ -945,7 +1350,7 @@ contains
     !
     ! !USES:
     use clm_time_manager     , only : get_curr_date, get_rest_date
-    use clm_varctl           , only : fname_len
+    use elm_varctl           , only : fname_len
     use dynSubgridControlMod , only : get_flanduse_timeseries
     !
     ! !ARGUMENTS:
@@ -1004,15 +1409,17 @@ contains
                 write(iulog,*) '(3) If you are confident that you are using the correct start date and initial conditions file,'
                 write(iulog,*) '    yet are still experiencing this error, then you can bypass this check by setting:'
                 write(iulog,*) '      check_finidat_year_consistency = .false.'
-                write(iulog,*) '    in user_nl_clm'
+                write(iulog,*) '    in user_nl_elm'
                 write(iulog,*) ' '
              end if
-             call endrun(msg=errMsg(sourcefile, __LINE__))
+             call endrun(msg=errMsg(__FILE__, __LINE__))
           end if  ! year /= rest_year
        end if  ! flanduse_timeseries_rest /= ' '
     end if  ! fpftdyn /= ' '
 
   end subroutine restFile_check_year
+
+
 
 end module restFileMod
 

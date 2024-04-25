@@ -129,8 +129,8 @@ def buildnml(case, caseroot, compname):
         lnd_grid = '512x1024'
 
     clmusr = ""
-    if lnd_grid == "CLM_USRDAT":
-        clm_usrdat_name = case.get_value("CLM_USRDAT_NAME")
+    if lnd_grid == "ELM_USRDAT":
+        clm_usrdat_name = case.get_value("ELM_USRDAT_NAME")
         lnd_grid = clm_usrdat_name
         clmusr = " -clm_usr_name %s "%clm_usrdat_name
 
@@ -245,7 +245,7 @@ def buildnml(case, caseroot, compname):
 
         cmd = os.path.join(lnd_root,"bld","build-namelist")
 
-        command = ("%s -cimeroot %s -infile %s -csmdata %s -inputdata %s %s -namelist \"&clm_inparm  start_ymd=%s %s/ \" "
+        command = ("%s -cimeroot %s -infile %s -csmdata %s -inputdata %s %s -namelist \"&elm_inparm  start_ymd=%s %s/ \" "
                    "%s %s -res %s %s -clm_start_type %s -envxml_dir %s "
                    "-configuration %s -structure %s "
                    "%s -glc_nec %s %s -co2_ppmv %s -co2_type %s -config %s -driver %s "

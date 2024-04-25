@@ -11,6 +11,7 @@ module dynFileMod
   use ncdio_pio      , only : file_desc_t, ncd_pio_openfile, ncd_inqdid, ncd_inqdlen, ncd_io
   use abortutils     , only : endrun
   implicit none
+  save
   private
   !
   ! !PUBLIC TYPES:
@@ -23,10 +24,6 @@ module dynFileMod
   interface dyn_file_type
      module procedure constructor  ! initialize a new dyn_file_type object
   end interface dyn_file_type
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
-  !-----------------------------------------------------------------------
 
 contains
   
@@ -44,15 +41,11 @@ contains
     ! this file (assumed to have dimension 'time'), and initializes a dyn_time_info object
     ! based on this YEAR variable and the current model year.
     !
-    ! year_position is a flag saying how to obtain the model year relative to the current
-    ! timestep; it must be one of the parameters defined in dynTimeInfoMod (e.g.,
-    ! YEAR_POSITION_START_OF_TIMESTEP or YEAR_POSITION_END_OF_TIMESTEP)
-    !
     ! !USES:
     use fileutils        , only : getfil
     !
     ! !ARGUMENTS:
-    character(len=*)         , intent(in) :: filename
+    character(len=*), intent(in) :: filename
     type(year_position_type) , intent(in) :: year_position
     !
     ! !LOCAL VARIABLES:
@@ -60,6 +53,10 @@ contains
     integer :: ier                   ! error code
     integer :: ntimes                ! number of time samples
     integer :: varid                 ! netcdf variable ID
+    integer :: cur_year              ! year (0, ...) for nstep+1
+    integer :: mon                   ! month (1, ..., 12) for nstep+1
+    integer :: day                   ! day of month (1, ..., 31) for nstep+1
+    integer :: sec                   ! seconds into current date for nstep+1
     integer, allocatable :: years(:) ! years in the file
 
     character(len=*), parameter :: subname = 'dyn_file_type constructor'
@@ -76,7 +73,7 @@ contains
     call ncd_inqdlen(constructor, varid, ntimes)
     allocate(years(ntimes), stat=ier)
     if (ier /= 0) then
-       call endrun(msg=' allocation error for years'//errMsg(sourcefile, __LINE__))
+       call endrun(msg=' allocation error for years'//errMsg(__FILE__, __LINE__))
     end if
     call ncd_io(ncid=constructor, varname='YEAR', flag='read', data=years)
     

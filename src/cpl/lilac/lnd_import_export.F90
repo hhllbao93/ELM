@@ -5,9 +5,9 @@ module lnd_import_export
   use shr_kind_mod          , only : r8 => shr_kind_r8, cx=>shr_kind_cx, cxx=>shr_kind_cxx, cs=>shr_kind_cs
   use shr_sys_mod           , only : shr_sys_abort
   use shr_const_mod         , only : fillvalue=>SHR_CONST_SPVAL
-  use clm_varctl            , only : iulog, ndep_from_cpl, co2_ppmv
+  use elm_varctl            , only : iulog, co2_ppmv, use_c13, use_atm_downscaling_to_topunit
   use clm_time_manager      , only : get_nstep
-  use clm_instMod           , only : atm2lnd_inst, lnd2atm_inst, water_inst
+  use elm_instMod           , only : atm2lnd_vars, lnd2atm_vars
   use domainMod             , only : ldomain
   use spmdMod               , only : masterproc
   use decompmod             , only : bounds_type
@@ -18,6 +18,8 @@ module lnd_import_export
   use shr_megan_mod         , only : shr_megan_mechcomps_n  ! TODO: need to add a namelist read here (see https://github.com/ESCOMP/CTSM/issues/926)
   use lnd_import_export_utils, only : derive_quantities, check_for_errors, check_for_nans
 
+  use GridcellType , only: grc_pp          ! for access to gridcell topology
+  use TopounitDataType , only: top_as, top_af  ! atmospheric state and flux variables  
   implicit none
   private ! except
 
@@ -36,6 +38,7 @@ module lnd_import_export
   integer                :: emis_nflds               ! number of fire emission fields from lnd-> atm
 
   integer, parameter     :: debug = 0                ! internal debug level
+!Huilin  integer, parameter     :: debug = 5                ! internal debug level
 
   character(*),parameter :: F01 = "('(lnd_import_export) ',a,i5,2x,i5,2x,d21.14)"
   character(*),parameter :: F02 = "('(lnd_import_export) ',a,i5,2x,i5,2x,d26.19)"
@@ -52,6 +55,10 @@ contains
     !---------------------------------------------------------------------------
     ! Convert the input data from lilac to the land model
     !---------------------------------------------------------------------------
+    !
+    ! !USES:
+    use elm_varcon       , only: rair, o2_molar_const, c13ratio
+    use shr_const_mod    , only: SHR_CONST_TKFRZ, SHR_CONST_STEBOL
 
     ! input/output variables
     type(ESMF_State)                :: importState
@@ -62,7 +69,13 @@ contains
     ! local variables
     integer                   :: num
     integer                   :: begg, endg                             ! bounds
-    integer                   :: g,i,k                                  ! indices
+    integer                   :: g,topo,i,k                                  ! indices
+    real(r8) :: esatw                ! saturation vapor pressure over water (Pa)
+    real(r8) :: esati                ! saturation vapor pressure over ice (Pa)
+    real(r8) :: a0,a1,a2,a3,a4,a5,a6 ! coefficients for esat over water
+    real(r8) :: b0,b1,b2,b3,b4,b5,b6 ! coefficients for esat over ice
+    real(r8) :: tdc, t               ! Kelvins to Celcius function and its input
+    real(r8) :: e, qsat, vp                   ! water vapor pressure (Pa)
     real(r8)                  :: forc_rainc(bounds%begg:bounds%endg)    ! rainxy Atm flux mm/s
     real(r8)                  :: forc_rainl(bounds%begg:bounds%endg)    ! rainxy Atm flux mm/s
     real(r8)                  :: forc_snowc(bounds%begg:bounds%endg)    ! snowfxy Atm flux  mm/s
@@ -73,6 +86,22 @@ contains
     real(r8)                  :: forc_pbot  ! atmospheric pressure (Pa)
     character(len=*), parameter :: subname='(lnd_import_export:import_fields)'
 
+    ! Constants to compute vapor pressure
+    parameter (a0=6.107799961_r8    , a1=4.436518521e-01_r8, &
+         a2=1.428945805e-02_r8, a3=2.650648471e-04_r8, &
+         a4=3.031240396e-06_r8, a5=2.034080948e-08_r8, &
+         a6=6.136820929e-11_r8)
+
+    parameter (b0=6.109177956_r8    , b1=5.034698970e-01_r8, &
+         b2=1.886013408e-02_r8, b3=4.176223716e-04_r8, &
+         b4=5.824720280e-06_r8, b5=4.838803174e-08_r8, &
+         b6=1.838826904e-10_r8)
+    !
+    ! function declarations
+    !
+    tdc(t) = min( 50._r8, max(-50._r8,(t-SHR_CONST_TKFRZ)) )
+    esatw(t) = 100._r8*(a0+t*(a1+t*(a2+t*(a3+t*(a4+t*(a5+t*a6))))))
+    esati(t) = 100._r8*(b0+t*(b1+t*(b2+t*(b3+t*(b4+t*(b5+t*b6))))))
     !---------------------------------------------------------------------------
 
     rc = ESMF_SUCCESS
@@ -88,7 +117,7 @@ contains
        ! require atm-land communication in initialization, which currently isn't done
        ! with the LILAC coupler.)
        call check_atm_landfrac(importState, bounds, rc)
-       if (ChkErr(rc,__LINE__,u_FILE_u)) return
+!hh!       if (ChkErr(rc,__LINE__,u_FILE_u)) return
     end if
 
     ! Note: precipitation fluxes received  from the coupler
@@ -102,35 +131,35 @@ contains
     !--------------------------
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_z', bounds, &
-         output=atm2lnd_inst%forc_hgt_grc, rc=rc)
+         output=atm2lnd_vars%forc_hgt_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_topo', bounds, &
-         output=atm2lnd_inst%forc_topo_grc, rc=rc)
+         output=atm2lnd_vars%forc_topo_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_u', bounds, &
-         output=atm2lnd_inst%forc_u_grc, rc=rc )
+         output=atm2lnd_vars%forc_u_grc, rc=rc )
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_v', bounds, &
-         output=atm2lnd_inst%forc_v_grc, rc=rc )
+         output=atm2lnd_vars%forc_v_grc, rc=rc )
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_ptem', bounds, &
-         output=atm2lnd_inst%forc_th_not_downscaled_grc, rc=rc)
+         output=atm2lnd_vars%forc_th_not_downscaled_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_shum', bounds, &
-         output=water_inst%wateratm2lndbulk_inst%forc_q_not_downscaled_grc, rc=rc)
+         output=atm2lnd_vars%forc_q_not_downscaled_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_pbot', bounds, &
-         output=atm2lnd_inst%forc_pbot_not_downscaled_grc, rc=rc)
+         output=atm2lnd_vars%forc_pbot_not_downscaled_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Sa_tbot', bounds, &
-         output=atm2lnd_inst%forc_t_not_downscaled_grc, rc=rc)
+         output=atm2lnd_vars%forc_t_not_downscaled_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_rainc', bounds, &
@@ -150,73 +179,73 @@ contains
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_lwdn', bounds, &
-         output=atm2lnd_inst%forc_lwrad_not_downscaled_grc, rc=rc)
+         output=atm2lnd_vars%forc_lwrad_not_downscaled_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_swvdr', bounds, &
-         output=atm2lnd_inst%forc_solad_grc(:,1), rc=rc)
+         output=atm2lnd_vars%forc_solad_grc(:,1), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_swndr', bounds, &
-         output=atm2lnd_inst%forc_solad_grc(:,2), rc=rc)
+         output=atm2lnd_vars%forc_solad_grc(:,2), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_swvdf', bounds, &
-         output=atm2lnd_inst%forc_solai_grc(:,1), rc=rc )
+         output=atm2lnd_vars%forc_solai_grc(:,1), rc=rc )
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_swndf', bounds, &
-         output=atm2lnd_inst%forc_solai_grc(:,2), rc=rc )
+         output=atm2lnd_vars%forc_solai_grc(:,2), rc=rc )
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! ! Atmosphere prognostic/prescribed aerosol fields
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_bcphidry', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,1), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,1), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_bcphodry', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,2), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,2), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_bcphiwet', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,3), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,3), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_ocphidry', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,4), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,4), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_ocphodry', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,5), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,5), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_ocphiwet', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,6), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,6), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstwet1', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,7),  rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,7),  rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstdry1', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,8),  rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,8),  rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstwet2', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,9),  rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,9),  rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstdry2', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,10), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,10), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstwet3', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,11), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,11), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstdry3', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,12), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,12), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstwet4', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,13), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,13), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_getimport(importState, 'c2l_fb_atm', 'Faxa_dstdry4', bounds, &
-         output=atm2lnd_inst%forc_aer_grc(:,14), rc=rc)
+         output=atm2lnd_vars%forc_aer_grc(:,14), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
-    ! call state_getimport(importState, 'c2l_fb_atm', 'Sa_methane', bounds, output=atm2lnd_inst%forc_pch4_grc, rc=rc )
+    ! call state_getimport(importState, 'c2l_fb_atm', 'Sa_methane', bounds, output=atm2lnd_vars%forc_pch4_grc, rc=rc )
     ! if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! The lilac is sending ndep in units if kgN/m2/s - and ctsm uses units of gN/m2/sec
@@ -226,18 +255,18 @@ contains
     ! call state_getimport(importState, 'c2l_fb_atm', 'Faxa_noy', bounds, output=forc_noy, rc=rc )
     ! if (ChkErr(rc,__LINE__,u_FILE_u)) return
     ! do g = begg,endg
-    !    atm2lnd_inst%forc_ndep_grc(g) = (forc_nhx(g) + forc_noy(g))*1000._r8
+    !    atm2lnd_vars%forc_ndep_grc(g) = (forc_nhx(g) + forc_noy(g))*1000._r8
     ! end do
 
     !--------------------------
     ! Set force flood back from river to 0
     !--------------------------
 
-    water_inst%wateratm2lndbulk_inst%forc_flood_grc(:) = 0._r8
+    atm2lnd_vars%forc_flood_grc(:) = 0._r8
 
     do g = begg, endg
-       water_inst%wateratm2lndbulk_inst%volr_grc(g) = 0._r8
-       water_inst%wateratm2lndbulk_inst%volrmch_grc(g) = 0._r8
+       atm2lnd_vars%volr_grc(g) = 0._r8
+       atm2lnd_vars%volrmch_grc(g) = 0._r8
     end do
 
     !--------------------------
@@ -245,13 +274,63 @@ contains
     ! and corresponding error checks
     !--------------------------
 
-    call derive_quantities(bounds, atm2lnd_inst, water_inst%wateratm2lndbulk_inst, forc_rainc, forc_rainl, forc_snowc, forc_snowl)
+    do g = begg, endg
+       do topo = grc_pp%topi(g), grc_pp%topf(g)
+         ! first, all the state forcings
+         top_as%tbot(topo)    = atm2lnd_vars%forc_t_not_downscaled_grc(g)      ! forc_txy  Atm state K
+         top_as%thbot(topo)   = atm2lnd_vars%forc_th_not_downscaled_grc(g)     ! forc_thxy Atm state K
+         top_as%pbot(topo)    = atm2lnd_vars%forc_pbot_not_downscaled_grc(g)   ! ptcmxy    Atm state Pa
+         top_as%qbot(topo)    = atm2lnd_vars%forc_q_not_downscaled_grc(g)      ! forc_qxy  Atm state kg/kg
+         top_as%ubot(topo)    = atm2lnd_vars%forc_u_grc(g)                     ! forc_uxy  Atm state m/s
+         top_as%vbot(topo)    = atm2lnd_vars%forc_v_grc(g)                     ! forc_vxy  Atm state m/s
+         top_as%ugust(topo)   = 0._r8                                          !           Atm state m/s
+         top_as%zbot(topo)    = atm2lnd_vars%forc_hgt_grc(g)                   ! zgcmxy    Atm state m
+         ! assign the state forcing fields derived from other inputs
+         ! Horizontal windspeed (m/s)
+         top_as%windbot(topo) = sqrt(top_as%ubot(topo)**2 + top_as%vbot(topo)**2)
+         ! Relative humidity (percent)
+         if (top_as%tbot(topo) > SHR_CONST_TKFRZ) then
+            e = esatw(tdc(top_as%tbot(topo)))
+         else
+            e = esati(tdc(top_as%tbot(topo)))
+         end if
+         qsat           = 0.622_r8*e / (top_as%pbot(topo) - 0.378_r8*e)
+         top_as%rhbot(topo) = 100.0_r8*(top_as%qbot(topo) / qsat)
+         ! partial pressure of oxygen (Pa)
+         top_as%po2bot(topo) = o2_molar_const * top_as%pbot(topo)
+         ! air density (kg/m**3) - uses a temporary calculation of water vapor pressure (Pa)
+         vp = top_as%qbot(topo) * top_as%pbot(topo)  / (0.622_r8 + 0.378_r8 * top_as%qbot(topo))
+         top_as%rhobot(topo) = (top_as%pbot(topo) - 0.378_r8 * vp) / (rair * top_as%tbot(topo))
 
-    call check_for_errors(bounds, atm2lnd_inst, water_inst%wateratm2lndbulk_inst)
+         ! second, all the flux forcings
+
+         top_af%rain(topo)    = forc_rainc(g) + forc_rainl(g)            ! sum of convective and large-scale rain
+         top_af%snow(topo)    = forc_snowc(g) + forc_snowl(g)            ! sum of convective and large-scale snow
+         top_af%solad(topo,2) = atm2lnd_vars%forc_solad_grc(g,2)   ! forc_sollxy  Atm flux  W/m^2
+         top_af%solad(topo,1) = atm2lnd_vars%forc_solad_grc(g,1)   ! forc_solsxy  Atm flux  W/m^2
+         top_af%solai(topo,2) = atm2lnd_vars%forc_solai_grc(g,2)   ! forc_solldxy Atm flux  W/m^2
+         top_af%solai(topo,1) = atm2lnd_vars%forc_solai_grc(g,1)   ! forc_solsdxy Atm flux  W/m^2
+         top_af%lwrad(topo)   = atm2lnd_vars%forc_lwrad_not_downscaled_grc(g)     ! flwdsxy Atm flux  W/m^2
+         ! derived flux forcings
+         top_af%solar(topo) = top_af%solad(topo,2) + top_af%solad(topo,1) + &
+                              top_af%solai(topo,2) + top_af%solai(topo,1)
+       end do
+    end do
+
+    call derive_quantities(bounds, atm2lnd_vars, forc_rainc, forc_rainl, forc_snowc, forc_snowl)
+
+    call check_for_errors(bounds, atm2lnd_vars)
 
     do g = begg, endg
-       forc_pbot = atm2lnd_inst%forc_pbot_not_downscaled_grc(g)
-       atm2lnd_inst%forc_pco2_grc(g) = co2_ppmv * 1.e-6_r8 * forc_pbot
+       forc_pbot = atm2lnd_vars%forc_pbot_not_downscaled_grc(g)
+       atm2lnd_vars%forc_pco2_grc(g) = co2_ppmv * 1.e-6_r8 * forc_pbot
+
+       do topo = grc_pp%topi(g), grc_pp%topf(g)
+         top_as%pco2bot(topo) = atm2lnd_vars%forc_pco2_grc(g)
+         if (use_c13) then
+            top_as%pc13o2bot(topo) = atm2lnd_vars%forc_pc13o2_grc(g)
+         end if
+       end do
     end do
 
   end subroutine import_fields
@@ -298,8 +377,8 @@ contains
        if (atm_landfrac(n) > 0._r8) then
           write(iulog,*) 'At point ', n, ' atm landfrac = ', atm_landfrac(n)
           write(iulog,*) 'but CTSM thinks this is ocean.'
-          call shr_sys_abort( subname//&
-               ' ERROR: atm landfrac > 0 for a point that CTSM thinks is ocean')
+!hh!          call shr_sys_abort( subname//&
+!hh!               ' ERROR: atm landfrac > 0 for a point that CTSM thinks is ocean')
        end if
     end do
 
@@ -331,126 +410,126 @@ contains
     ! -----------------------
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_t', bounds, &
-         input=lnd2atm_inst%t_rad_grc, rc=rc)
+         input=lnd2atm_vars%t_rad_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_snowh', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%h2osno_grc, rc=rc)
+         input=lnd2atm_vars%h2osno_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_avsdr', bounds, &
-         input=lnd2atm_inst%albd_grc(bounds%begg:,1), rc=rc)
+         input=lnd2atm_vars%albd_grc(bounds%begg:,1), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_anidr', bounds, &
-         input=lnd2atm_inst%albd_grc(bounds%begg:,2), rc=rc)
+         input=lnd2atm_vars%albd_grc(bounds%begg:,2), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_avsdf', bounds, &
-         input=lnd2atm_inst%albi_grc(bounds%begg:,1), rc=rc)
+         input=lnd2atm_vars%albi_grc(bounds%begg:,1), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_anidf', bounds, &
-         input=lnd2atm_inst%albi_grc(bounds%begg:,2), rc=rc)
+         input=lnd2atm_vars%albi_grc(bounds%begg:,2), rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_tref', bounds, &
-         input=lnd2atm_inst%t_ref2m_grc, rc=rc)
+         input=lnd2atm_vars%t_ref2m_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_qref', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%q_ref2m_grc, rc=rc)
+         input=lnd2atm_vars%q_ref2m_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_u10', bounds, &
-         input=lnd2atm_inst%u_ref10m_grc, rc=rc)
+         input=lnd2atm_vars%u_ref10m_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_taux', bounds, &
-         input=lnd2atm_inst%taux_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%taux_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_tauy', bounds, &
-         input=lnd2atm_inst%tauy_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%tauy_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_lat', bounds, &
-         input=lnd2atm_inst%eflx_lh_tot_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%eflx_lh_tot_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_sen', bounds, &
-         input=lnd2atm_inst%eflx_sh_tot_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%eflx_sh_tot_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_lwup', bounds, &
-         input=lnd2atm_inst%eflx_lwrad_out_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%eflx_lwrad_out_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_evap', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%qflx_evap_tot_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%qflx_evap_tot_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_swnet', bounds, &
-         input=lnd2atm_inst%fsa_grc, rc=rc)
+         input=lnd2atm_vars%fsa_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_flxdst1', bounds, &
-         input=lnd2atm_inst%flxdst_grc(:,1), minus=.true., rc=rc)
+         input=lnd2atm_vars%flxdst_grc(:,1), minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_flxdst2', bounds, &
-         input=lnd2atm_inst%flxdst_grc(:,2), minus=.true., rc=rc)
+         input=lnd2atm_vars%flxdst_grc(:,2), minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_flxdst3', bounds, &
-         input=lnd2atm_inst%flxdst_grc(:,3), minus=.true., rc=rc)
+         input=lnd2atm_vars%flxdst_grc(:,3), minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
     call state_setexport(exportState, 'l2c_fb_atm', 'Fall_flxdst4', bounds, &
-         input=lnd2atm_inst%flxdst_grc(:,4), minus=.true., rc=rc)
+         input=lnd2atm_vars%flxdst_grc(:,4), minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_ram1', bounds, &
-         input=lnd2atm_inst%ram1_grc, rc=rc)
+         input=lnd2atm_vars%ram1_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_fv', bounds, &
-         input=lnd2atm_inst%fv_grc, rc=rc)
+         input=lnd2atm_vars%fv_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     call state_setexport(exportState, 'l2c_fb_atm', 'Sl_z0m', bounds, &
-         input=lnd2atm_inst%z0m_grc, rc=rc)
+         input=lnd2atm_vars%z0m_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! methanem
     ! call state_setexport(exportState, 'l2c_fb_atm', 'Fall_methane', bounds, &
-    !    input=lnd2atm_inst%flux_ch4_grc, minus=.true., rc=rc)
+    !    input=lnd2atm_vars%flux_ch4_grc, minus=.true., rc=rc)
     ! if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! soil water
     ! call state_setexport(exportState, 'l2c_fb_atm', 'Sl_soilw', bounds, &
-    !    input=water_inst%waterlnd2atmbulk_inst%h2osoi_vol_grc(:,1), rc=rc)
+    !    input=atm2lnd_vars%h2osoi_vol_grc(:,1), rc=rc)
     ! if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! dry dep velocities
     ! do num = 1, drydep_nflds
     !    call state_setexport(exportState, 'l2c_fb_atm', 'Sl_ddvel', bounds, &
-    !       input=lnd2atm_inst%ddvel_grc(:,num), ungridded_index=num, rc=rc)
+    !       input=lnd2atm_vars%ddvel_grc(:,num), ungridded_index=num, rc=rc)
     !    if (ChkErr(rc,__LINE__,u_FILE_u)) return
     ! end do
 
     ! MEGAN VOC emis fluxes
     ! do num = 1, shr_megan_mechcomps_n
     !    call state_setexport(exportState, 'l2c_fb_atm', 'Fall_voc', bounds, &
-    !       input=lnd2atm_inst%flxvoc_grc(:,num), minus=.true., ungridded_index=num, rc=rc)
+    !       input=lnd2atm_vars%flxvoc_grc(:,num), minus=.true., ungridded_index=num, rc=rc)
     !    if (ChkErr(rc,__LINE__,u_FILE_u)) return
     ! end do
 
     ! fire emis fluxes
     ! do num = 1, emis_nflds
     !    call state_setexport(exportState, 'l2c_fb_atm', 'Fall_fire', bounds, &
-    !       input=lnd2atm_inst%fireflx_grc(:,num), minus=.true., ungridded_index=num, rc=rc)
+    !       input=lnd2atm_vars%fireflx_grc(:,num), minus=.true., ungridded_index=num, rc=rc)
     !    if (ChkErr(rc,__LINE__,u_FILE_u)) return
     ! end do
     ! if (emis_nflds > 0) then
-    !    call state_setexport(exportState, 'l2c_fb_atm', 'Sl_fztopo', bounds, input=lnd2atm_inst%fireztop_grc, rc=rc)
+    !    call state_setexport(exportState, 'l2c_fb_atm', 'Sl_fztopo', bounds, input=lnd2atm_vars%fireztop_grc, rc=rc)
     !    if (ChkErr(rc,__LINE__,u_FILE_u)) return
     ! endif
     ! sign convention is positive downward with hierarchy of atm/glc/lnd/rof/ice/ocn.
@@ -462,18 +541,18 @@ contains
 
     ! surface runoff is the sum of qflx_over, qflx_h2osfc_surf
     ! do g = bounds%begg,bounds%endg
-    !    array(g) = water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qsur_grc(g) + &
-    !               water_inst%waterlnd2atmbulk_inst%qflx_rofliq_h2osfc_grc(g)
+    !    array(g) = atm2lnd_vars%qflx_rofliq_qsur_grc(g) + &
+    !               atm2lnd_vars%qflx_rofliq_h2osfc_grc(g)
     ! end do
 
     call state_setexport(exportState, 'l2c_fb_rof', 'Flrl_rofsur', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qsur_grc, rc=rc)
+         input=lnd2atm_vars%qflx_rofliq_qsur_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! subsurface runoff is the sum of qflx_drain and qflx_perched_drain
     do g = bounds%begg,bounds%endg
-       array(g) = water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qsub_grc(g) + &
-                  water_inst%waterlnd2atmbulk_inst%qflx_rofliq_drain_perched_grc(g)
+       array(g) = lnd2atm_vars%qflx_rofliq_qsub_grc(g) + &
+                  lnd2atm_vars%qflx_rofliq_drain_perched_grc(g)
     end do
     call state_setexport(exportState, 'l2c_fb_rof', 'Flrl_rofsub', bounds, &
          input=array, rc=rc)
@@ -481,17 +560,17 @@ contains
 
     ! qgwl sent individually to coupler
     call state_setexport(exportState, 'l2c_fb_rof', 'Flrl_rofgwl', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%qflx_rofliq_qgwl_grc, rc=rc)
+         input=lnd2atm_vars%qflx_rofliq_qgwl_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! ice  sent individually to coupler
     call state_setexport(exportState, 'l2c_fb_rof', 'Flrl_rofi', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%qflx_rofice_grc, rc=rc)
+         input=lnd2atm_vars%qflx_rofice_grc, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     ! irrigation flux to be removed from main channel storage (negative)
     call state_setexport(exportState, 'l2c_fb_rof', 'Flrl_irrig', bounds, &
-         input=water_inst%waterlnd2atmbulk_inst%qirrig_grc, minus=.true., rc=rc)
+         input=lnd2atm_vars%qirrig_grc, minus=.true., rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
   end subroutine export_fields

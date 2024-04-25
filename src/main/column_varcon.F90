@@ -2,10 +2,11 @@ module column_varcon
 
   !-----------------------------------------------------------------------
   ! !DESCRIPTION:
-  ! Module containing column indices and associated variables and routines.
+  ! Module containing landunit indices and associated variables and routines.
   !
   ! !USES:
 #include "shr_assert.h"
+  use shr_log_mod    , only : errMsg => shr_log_errMsg
   use landunit_varcon, only : isturb_MIN
   !
   ! !PUBLIC TYPES:
@@ -28,15 +29,11 @@ module column_varcon
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   public :: is_hydrologically_active   ! returns true if the given column type is hydrologically active
-  public :: ice_class_to_col_itype     ! convert an ice class (1..maxpatch_glc) into col%itype
-  public :: col_itype_to_ice_class     ! convert col%itype into an ice class (1..maxpatch_glc)
-  public :: write_coltype_metadata     ! write column type metadata to a netcdf file
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
+  public :: icemec_class_to_col_itype  ! convert an icemec class (1..maxpatch_glcmec) into col_pp%itype
+  public :: col_itype_to_icemec_class  ! convert col_pp%itype into an icemec class (1..maxpatch_glcmec)
 
 contains
-
+  
   !-----------------------------------------------------------------------
   function is_hydrologically_active(col_itype, lun_itype) &
        result(hydrologically_active)
@@ -75,96 +72,56 @@ contains
 
   end function is_hydrologically_active
 
-  
   !-----------------------------------------------------------------------
-  function ice_class_to_col_itype(ice_class) result(col_itype)
+  function icemec_class_to_col_itype(icemec_class) result(col_itype)
     !
     ! !DESCRIPTION:
-    ! Convert an ice class (1..maxpatch_glc) into col%itype
+    ! Convert an icemec class (1..maxpatch_glcmec) into col_pp%itype
     !
     ! !USES:
-    use clm_varpar, only : maxpatch_glc
-    use landunit_varcon, only : istice
+    use elm_varpar, only : maxpatch_glcmec
+    use landunit_varcon, only : istice_mec
     !
     ! !ARGUMENTS:
-    integer :: col_itype             ! function result
-    integer, intent(in) :: ice_class ! ice class, between 1 and maxpatch_glc
+    integer :: col_itype                ! function result
+    integer, intent(in) :: icemec_class ! icemec class, between 1 and maxpatch_glcmec
     !
     ! !LOCAL VARIABLES:
     
-    character(len=*), parameter :: subname = 'ice_class_to_col_itype'
+    character(len=*), parameter :: subname = 'icemec_class_to_col_itype'
     !-----------------------------------------------------------------------
     
-    SHR_ASSERT_FL((1 <= ice_class .and. ice_class <= maxpatch_glc), sourcefile, __LINE__)
+    SHR_ASSERT((1 <= icemec_class .and. icemec_class <= maxpatch_glcmec), errMsg(__FILE__, __LINE__))
 
-    col_itype = istice*100 + ice_class
+    col_itype = istice_mec*100 + icemec_class
 
-  end function ice_class_to_col_itype
+  end function icemec_class_to_col_itype
 
   !-----------------------------------------------------------------------
-  function col_itype_to_ice_class(col_itype) result(ice_class)
+  function col_itype_to_icemec_class(col_itype) result(icemec_class)
     !
     ! !DESCRIPTION:
-    ! Convert a col%itype value (for an ice landunit) into an ice class (1..maxpatch_glc)
+    ! Convert a col_pp%itype value (for an icemec landunit) into an icemec class (1..maxpatch_glcmec)
     !
     ! !USES:
-    use clm_varpar, only : maxpatch_glc
-    use landunit_varcon, only : istice
+    use elm_varpar, only : maxpatch_glcmec
+    use landunit_varcon, only : istice_mec
     !
     ! !ARGUMENTS:
-    integer :: ice_class             ! function result
-    integer, intent(in) :: col_itype ! col%itype value for an ice landunit
+    integer :: icemec_class          ! function result
+    integer, intent(in) :: col_itype ! col_pp%itype value for an icemec landunit
     !
     ! !LOCAL VARIABLES:
     
-    character(len=*), parameter :: subname = 'col_itype_to_ice_class'
+    character(len=*), parameter :: subname = 'col_itype_to_icemec_class'
     !-----------------------------------------------------------------------
     
-    ice_class = col_itype - istice*100
+    icemec_class = col_itype - istice_mec*100
 
     ! The following assertion is here to ensure that col_itype is really from an
-    ! istice landunit
-    SHR_ASSERT_FL((1 <= ice_class .and. ice_class <= maxpatch_glc), sourcefile, __LINE__)
+    ! istice_mec landunit
+    SHR_ASSERT((1 <= icemec_class .and. icemec_class <= maxpatch_glcmec), errMsg(__FILE__, __LINE__))
 
-  end function col_itype_to_ice_class
-
-  !-----------------------------------------------------------------------
-  subroutine write_coltype_metadata(att_prefix, ncid)
-    !
-    ! !DESCRIPTION:
-    ! Writes column type metadata to a netcdf file.
-    !
-    ! Note that, unlike pft and landunit metadata, this column type metadata is NOT
-    ! stored in an array. This is because of the trickiness of encoding column values for
-    ! crop & ice. So instead, other code must call this routine to do the work of
-    ! adding the appropriate metadata directly to a netcdf file.
-    !
-    ! !USES:
-    use ncdio_pio, only : file_desc_t, ncd_global, ncd_putatt
-    !
-    ! !ARGUMENTS:
-    character(len=*)  , intent(in)    :: att_prefix ! prefix for attributes (e.g., 'icol_')
-    type(file_desc_t) , intent(inout) :: ncid       ! local file id
-    !
-    ! !LOCAL VARIABLES:
-
-    character(len=*), parameter :: subname = 'write_coltype_metadata'
-    !-----------------------------------------------------------------------
-
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'vegetated_or_bare_soil', 1)
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'crop'                  , 2) 
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'crop_noncompete'       , '2*100+m, m=cft_lb,cft_ub')
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'landice'               , 3) 
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'landice', '4*100+m, m=1,glcnec')
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'deep_lake'             , 5) 
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'wetland'               , 6) 
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_roof'            , icol_roof)
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_sunwall'         , icol_sunwall)
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_shadewall'       , icol_shadewall)
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_impervious_road' , icol_road_imperv)
-    call ncd_putatt(ncid, ncd_global, att_prefix // 'urban_pervious_road'   , icol_road_perv)
-
-  end subroutine write_coltype_metadata
-
+  end function col_itype_to_icemec_class
 
 end module column_varcon

@@ -3,79 +3,60 @@ module readParamsMod
   !-----------------------------------------------------------------------
   !
   ! Read parameters
-  ! module used to read parameters for individual modules and/or for some 
-  ! well defined functionality (eg. ED).
+  ! module used to read parameters for individual modules
   !
-  ! ! USES:
-  use clm_varctl , only : paramfile, iulog, use_fates, use_cn
-  use SoilBiogeochemDecompCascadeConType, only : mimics_decomp, century_decomp, decomp_method
-  use spmdMod    , only : masterproc
-  use fileutils  , only : getfil
-  use ncdio_pio  , only : ncd_pio_closefile, ncd_pio_openfile
-  use ncdio_pio  , only : file_desc_t , ncd_inqdid, ncd_inqdlen
-
+  use elm_varctl   , only: use_cn, use_century_decomp
+  use elm_varctl   , only: use_lch4, use_fates
   implicit none
+  save
   private
   !
-  public :: readParameters
-
+  public :: readSharedParameters
+  public :: readPrivateParameters
+  
   !-----------------------------------------------------------------------
 
 contains
 
   !-----------------------------------------------------------------------
-  subroutine readParameters (photosyns_inst)
+  subroutine readSharedParameters ()
     !
-    ! ! USES:
-    use CNSharedParamsMod                 , only : CNParamsReadShared
-    use CNAllocationMod                   , only : readCNAllocParams                      => readParams
-    use CNGapMortalityMod                 , only : readCNGapMortParams                    => readParams
-    use CNMRespMod                        , only : readCNMRespParams                      => readParams
-    use CNFUNMod                          , only : readCNFUNParams                        => readParams
-    use CNPhenologyMod                    , only : readCNPhenolParams                     => readParams
-    use SoilBiogeochemCompetitionMod      , only : readSoilBiogeochemCompetitionParams    => readParams
-    use SoilBiogeochemNLeachingMod        , only : readSoilBiogeochemNLeachingParams      => readParams
-    use SoilBiogeochemNitrifDenitrifMod   , only : readSoilBiogeochemNitrifDenitrifParams => readParams
-    use SoilBiogeochemLittVertTranspMod   , only : readSoilBiogeochemLittVertTranspParams => readParams
-    use SoilBiogeochemPotentialMod        , only : readSoilBiogeochemPotentialParams      => readParams
-    use SoilBiogeochemDecompMod           , only : readSoilBiogeochemDecompParams         => readParams
-    use SoilBiogeochemDecompCascadeMIMICSMod, only : readSoilBiogeochemDecompMimicsParams => readParams
-    use SoilBiogeochemDecompCascadeBGCMod , only : readSoilBiogeochemDecompBgcParams      => readParams
-    use ch4Mod                            , only : readCH4Params                          => readParams
-    use LunaMod                           , only : readParams_Luna                        => readParams
-    use BareGroundFluxesMod               , only : readParams_BareGroundFluxes            => readParams
-    use LakeFluxesMod                     , only : readParams_LakeFluxes                  => readParams
-    use CanopyFluxesMod                   , only : readParams_CanopyFluxes                => readParams
-    use UrbanFluxesMod                    , only : readParams_UrbanFluxes                 => readParams
-    use CanopyHydrologyMod                , only : readParams_CanopyHydrology             => readParams
-    use SoilHydrologyMod                  , only : readParams_SoilHydrology               => readParams
-    use SoilStateInitTimeConstMod         , only : readParams_SoilStateInitTimeConst      => readParams
-    use SoilWaterMovementMod              , only : readParams_SoilWaterMovement           => readParams
-    use SaturatedExcessRunoffMod          , only : readParams_SaturatedExcessRunoff       => readParams
-    use InfiltrationExcessRunoffMod       , only : readParams_InfiltrationExcessRunoff    => readParams
-    use SurfaceResistanceMod              , only : readParams_SurfaceResistance           => readParams
-    use WaterDiagnosticBulkType           , only : readParams_WaterDiagnosticBulk         => readParams
-    use SnowHydrologyMod                  , only : readParams_SnowHydrology               => readParams
-    use SnowSnicarMod                     , only : readParams_SnowSnicar                  => readParams
-    use initVerticalMod                   , only : readParams_initVertical                => readParams
-    use SurfaceWaterMod                   , only : readParams_SurfaceWater                => readParams
-    use SoilHydrologyInitTimeConstMod     , only : readParams_SoilHydrologyInitTimeConst  => readParams
-    use clm_varctl,                         only : NLFilename_in
-    use PhotosynthesisMod                 , only : photosyns_type
+    implicit none
+    !-----------------------------------------------------------------------
+
+    call CNParamsSharedReadFile()
+
+  end subroutine readSharedParameters
+
+  !-----------------------------------------------------------------------
+
+  subroutine CNParamsSharedReadFile ()
+    !
+    ! read CN and BGC shared parameters
+    !
+
+    use SharedParamsMod       , only : ParamsReadShared
+
+    use elm_varctl              , only : paramfile, iulog
+    use spmdMod                 , only : masterproc
+    use fileutils               , only : getfil
+    use ncdio_pio               , only : ncd_pio_closefile, ncd_pio_openfile, &
+                                         file_desc_t, ncd_inqdid, ncd_inqdlen                                       
     !
     ! !ARGUMENTS:
-    type(photosyns_type)                   , intent(in) :: photosyns_inst
+    implicit none
     !
-    ! !LOCAL VARIABLES:
+    ! !OTHER LOCAL VARIABLES:
+    character(len=32)  :: subname = 'CNParamsSharedReadFile'
     character(len=256) :: locfn ! local file name
     type(file_desc_t)  :: ncid  ! pio netCDF file id
     integer            :: dimid ! netCDF dimension id
     integer            :: npft  ! number of pfts on pft-physiology file
-    character(len=32)  :: subname = 'readParameters'
     !-----------------------------------------------------------------------
 
     if (masterproc) then
-       write(iulog,*) 'paramMod.F90::'//trim(subname)//' :: reading CLM '//' parameters '
+       write(iulog,*) 'readParamsMod.F90::'//trim(subname)//' :: reading CN '//&
+          'and BGC parameter file'
     end if
 
     call getfil (paramfile, locfn, 0)
@@ -84,61 +65,117 @@ contains
     call ncd_inqdlen(ncid,dimid,npft) 
 
     !
-    ! Above ground biogeochemistry...
+    ! some parameters (eg. organic_max) are used in non-CN, non-BGC cases
     !
-    if (use_cn) then
+    call ParamsReadShared(ncid)
+
+
+  end subroutine CNParamsSharedReadFile
+
+  !-----------------------------------------------------------------------
+  subroutine readPrivateParameters
+    ! read CN and BGC shared parameters
+    !
+    use AllocationMod          , only : readCNAllocParams    
+    use SoilLittDecompMod              , only : readSoilLittDecompParams
+    use DecompCascadeBGCMod    , only : readDecompBGCParams
+    use DecompCascadeCNMod     , only : readDecompCNParams
+    use PhenologyMod             , only : readPhenolParams
+    use CNPhenologyBeTRMod       , only : readCNPhenolBeTRParams
+    use MaintenanceRespMod               , only : readMaintenanceRespParams
+    use NitrogenDynamicsMod           , only : readNitrogenDynamicsParams
+    use GapMortalityMod          , only : readGapMortParams 
+    use CNGapMortalityBeTRMod    , only : readCNGapMortBeTRParams
+    use NitrifDenitrifMod      , only : readNitrifDenitrifParams
+    use SoilLittVertTranspMod    , only : readSoilLittVertTranspParams
+    use CH4Mod                   , only : readCH4Params
+!hh!    use elm_varctl               , only : paramfile, iulog, use_betr, use_hydrstress
+    use elm_varctl               , only : paramfile, iulog, use_hydrstress
+    use spmdMod                  , only : masterproc
+    use fileutils                , only : getfil
+    use ncdio_pio                , only : ncd_pio_closefile, ncd_pio_openfile, &
+                                          file_desc_t, ncd_inqdid, ncd_inqdlen
+!hh!    use tracer_varcon            , only : is_active_betr_bgc                                         
+    use PhotosynthesisMod        , only : params_inst
+    
+    !
+    ! !ARGUMENTS:
+    implicit none
+    !
+    ! !OTHER LOCAL VARIABLES:
+    character(len=32)  :: subname = 'readPrivateParameters'
+    character(len=256) :: locfn ! local file name
+    type(file_desc_t)  :: ncid  ! pio netCDF file id
+    integer            :: dimid ! netCDF dimension id
+    integer            :: npft  ! number of pfts on pft-physiology file
+    !-----------------------------------------------------------------------
+
+    if (masterproc) then
+       write(iulog,*) 'readParamsMod.F90::'//trim(subname)//' :: reading CN '//&
+          'and BGC parameter file'
+    end if
+
+    call getfil (paramfile, locfn, 0)
+    call ncd_pio_openfile (ncid, trim(locfn), 0)
+    call ncd_inqdid(ncid,'pft',dimid) 
+    call ncd_inqdlen(ncid,dimid,npft)
+    
+!hh!    if(use_betr)then
+!hh!    !  the following will be replaced with something more general. Jinyun Tang
+!hh!    !  call bgc_reaction%readParams(ncid, betrtracer_vars)   
+!hh!    endif
+
+    !
+    ! populate each module with private parameters
+    !       
+
+    if ( (use_cn .or. use_fates) ) then
+
        call readCNAllocParams(ncid)
-       call readCNGapMortParams(ncid)
-       call readCNMRespParams(ncid)
-       call readCNFUNParams(ncid)
-       call readCNPhenolParams(ncid)
+!hh!       if(.not. is_active_betr_bgc) then
+         call readSoilLittDecompParams(ncid)
+         if (use_century_decomp) then
+            call readDecompBGCParams(ncid)
+         else
+            call readDecompCNParams(ncid)
+         end if
+       
+         call readNitrifDenitrifParams(ncid)
+
+         call readSoilLittVertTranspParams(ncid)
+       
+         if (use_lch4) then
+            call readCH4Params (ncid)
+         end if
+!hh!      endif
+      call readNitrogenDynamicsParams (ncid)
     end if
 
-    !
-    ! Soil biogeochemistry...
-    !
-    if (use_cn .or. use_fates) then
-       call readSoilBiogeochemCompetitionParams(ncid)
-       if (decomp_method == mimics_decomp) then
-          call readSoilBiogeochemDecompMimicsParams(ncid)
-       else if (decomp_method == century_decomp) then
-          call readSoilBiogeochemDecompBgcParams(ncid)
-       end if
-       call readSoilBiogeochemDecompParams(ncid)
-       call readSoilBiogeochemLittVertTranspParams(ncid)
-       call readSoilBiogeochemNitrifDenitrifParams(ncid)
-       call readSoilBiogeochemNLeachingParams(ncid)
-       call readSoilBiogeochemPotentialParams(ncid)
-       call CNParamsReadShared(ncid, NLFilename_in)  ! this is called CN params but really is for the soil biogeochem parameters
-
-       call readCH4Params (ncid)
+    if (use_cn) then
+!hh!       if(is_active_betr_bgc)then
+!hh!         call readCNPhenolBeTRParams(ncid)
+!hh!       else
+         call readPhenolParams(ncid)
+!hh!       endif
+       call readMaintenanceRespParams (ncid)
+!hh!       if(is_active_betr_bgc)then
+!hh!         call readCNGapMortBeTRParams (ncid)
+!hh!       else
+         call readGapMortParams (ncid)
+!hh!       endif
     end if
-
     !
     ! Biogeophysics
     !
-    call photosyns_inst%ReadParams( ncid )
-    call readParams_Luna ( ncid )
-    call readParams_BareGroundFluxes ( ncid )
-    call readParams_LakeFluxes ( ncid )
-    call readParams_CanopyFluxes ( ncid )
-    call readParams_UrbanFluxes ( ncid )
-    call readParams_CanopyHydrology ( ncid )
-    call readParams_SoilHydrology ( ncid )
-    call readParams_SoilStateInitTimeConst ( ncid )
-    call readParams_SaturatedExcessRunoff ( ncid )
-    call readParams_SoilWaterMovement ( ncid )
-    call readParams_InfiltrationExcessRunoff ( ncid )
-    call readParams_SurfaceResistance ( ncid )
-    call readParams_WaterDiagnosticBulk ( ncid )
-    call readParams_SnowHydrology ( ncid )
-    call readParams_SnowSnicar ( ncid )
-    call readParams_initVertical ( ncid )
-    call readParams_SurfaceWater ( ncid )
-    call readParams_SoilHydrologyInitTimeConst ( ncid )
+    if(use_hydrstress)then
+      call params_inst%readParams( ncid )
+    endif
+
+    !
+    ! close CN params file
     !
     call ncd_pio_closefile(ncid)
 
-  end subroutine readParameters
 
+ end subroutine readPrivateParameters
 end module readParamsMod

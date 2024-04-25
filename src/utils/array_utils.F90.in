@@ -28,7 +28,7 @@ module array_utils
   public :: pack_wrapper       ! wrap the intrinsic pack function, first allocating the destination array
 
   interface convert_to_logical
-     !DIMS 1,2,3
+     !DIMS 1,2,3,4
      !TYPE double,real,int
      module procedure convert_to_logical_{DIMS}d_{TYPE}
   end interface convert_to_logical
@@ -103,7 +103,7 @@ contains
   end subroutine find_k_max_indices
 
   !-----------------------------------------------------------------------
-  !DIMS 1,2,3
+  !DIMS 1,2,3,4
   !TYPE double,real,int
   subroutine convert_to_logical_{DIMS}d_{TYPE}(data_numeric, data_logical)
     !

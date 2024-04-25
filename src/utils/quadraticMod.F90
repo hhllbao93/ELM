@@ -3,14 +3,11 @@ module quadraticMod
   use abortutils  ,   only: endrun
   use shr_kind_mod,   only: r8 => shr_kind_r8
   use shr_log_mod ,   only: errMsg => shr_log_errMsg
-  use clm_varctl  ,   only: iulog
+  use elm_varctl  ,   only: iulog
 
   implicit none
 
   public :: quadratic
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
 
 contains
 
@@ -35,33 +32,17 @@ contains
      !
      ! !LOCAL VARIABLES:
      real(r8) :: q                        ! Temporary term for quadratic solution
-     real(r8) :: root                     ! Term that will have a square root taken
-     character(len=*), parameter :: subname = 'quadratic'
      !------------------------------------------------------------------------------
     
      if (a == 0._r8) then
-        write (iulog,*) subname//' ERROR: Quadratic solution error: a = ',a
-        write (iulog,*) errmsg(sourcefile, __LINE__)
-        call endrun(msg=subname//' ERROR: Quadratic solution error' )
-        return
-     end if
-
-     root = b*b - 4._r8*a*c
-     if ( root < 0.0 )then
-        if ( -root < 3.0_r8*epsilon(b) )then
-           root = 0.0_r8
-        else
-           write (iulog,*) subname//' ERROR: Quadratic solution error: b^2 - 4ac is negative = ', root
-           write (iulog,*) errmsg(sourcefile, __LINE__)
-           call endrun( msg=subname//' ERROR: Quadratic solution error: b^2 - 4ac is negative' )
-           return
-        end if
+        write (iulog,*) 'Quadratic solution error: a = ',a
+        call endrun(msg=errmsg(__FILE__, __LINE__))
      end if
    
      if (b >= 0._r8) then
-        q = -0.5_r8 * (b + sqrt(root))
+        q = -0.5_r8 * (b + sqrt(b*b - 4._r8*a*c))
      else
-        q = -0.5_r8 * (b - sqrt(root))
+        q = -0.5_r8 * (b - sqrt(b*b - 4._r8*a*c))
      end if
    
      r1 = q / a

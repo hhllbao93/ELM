@@ -10,19 +10,18 @@ module UrbanAlbedoMod
   use shr_kind_mod      , only : r8 => shr_kind_r8
   use shr_sys_mod       , only : shr_sys_flush 
   use shr_log_mod       , only : errMsg => shr_log_errMsg
-  use decompMod         , only : bounds_type, subgrid_level_landunit
-  use clm_varpar        , only : numrad
-  use clm_varcon        , only : isecspday, degpsec
-  use clm_varctl        , only : iulog
+  use decompMod         , only : bounds_type
+  use elm_varpar        , only : numrad
+  use elm_varcon        , only : isecspday, degpsec, namel
+  use elm_varctl        , only : iulog
   use abortutils        , only : endrun  
   use UrbanParamsType   , only : urbanparams_type
-  use WaterStateBulkType    , only : waterstatebulk_type
-  use WaterDiagnosticBulkType    , only : waterdiagnosticbulk_type
   use SolarAbsorbedType , only : solarabs_type
   use SurfaceAlbedoType , only : surfalb_type
-  use LandunitType      , only : lun                
-  use ColumnType        , only : col                
-  use PatchType         , only : patch                
+  use LandunitType      , only : lun_pp                
+  use ColumnType        , only : col_pp
+  use ColumnDataType    , only : col_ws  
+  use VegetationType    , only : veg_pp                
   !
   ! !PUBLIC TYPES:
   implicit none
@@ -37,9 +36,6 @@ module UrbanAlbedoMod
   private :: incident_direct  ! Direct beam solar rad incident on walls and road in urban canyon 
   private :: incident_diffuse ! Diffuse solar rad incident on walls and road in urban canyon
   private :: net_solar        ! Solar radiation absorbed by road and both walls in urban canyon 
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
   !-----------------------------------------------------------------------
 
 contains
@@ -47,7 +43,7 @@ contains
   !-----------------------------------------------------------------------
   subroutine UrbanAlbedo (bounds, num_urbanl, filter_urbanl, &
        num_urbanc, filter_urbanc, num_urbanp, filter_urbanp, &
-       waterstatebulk_inst, waterdiagnosticbulk_inst, urbanparams_inst, solarabs_inst, surfalb_inst) 
+       urbanparams_vars, solarabs_vars, surfalb_vars) 
     !
     ! !DESCRIPTION: 
     ! Determine urban landunit component albedos
@@ -59,7 +55,7 @@ contains
     !
     ! !USES:
     use shr_orb_mod   , only : shr_orb_decl, shr_orb_cosz
-    use clm_varcon    , only : sb
+    use elm_varcon    , only : sb
     use column_varcon , only : icol_roof, icol_sunwall, icol_shadewall
     use column_varcon , only : icol_road_perv, icol_road_imperv
     !
@@ -71,11 +67,9 @@ contains
     integer                , intent(in)    :: filter_urbanc(:) ! urban column filter
     integer                , intent(in)    :: num_urbanp       ! number of urban patches in clump
     integer                , intent(in)    :: filter_urbanp(:) ! urban pft filter
-    type(waterstatebulk_type)  , intent(in)    :: waterstatebulk_inst
-    type(waterdiagnosticbulk_type)  , intent(in)    :: waterdiagnosticbulk_inst
-    type(urbanparams_type) , intent(inout) :: urbanparams_inst
-    type(solarabs_type)    , intent(inout) :: solarabs_inst
-    type(surfalb_type)     , intent(inout) :: surfalb_inst
+    type(urbanparams_type) , intent(inout) :: urbanparams_vars
+    type(solarabs_type)    , intent(inout) :: solarabs_vars
+    type(surfalb_type)     , intent(inout) :: surfalb_vars
     !
     ! !LOCAL VARIABLES:
     integer  :: fl,fp,fc,g,l,p,c,ib                                  ! indices
@@ -116,50 +110,48 @@ contains
     !-----------------------------------------------------------------------
 
     associate(                                                        &
-         ctype              => col%itype                            , & ! Input:  [integer (:)    ]  column type                                        
-         coli               => lun%coli                             , & ! Input:  [integer (:)    ]  beginning column index for landunit                
-         canyon_hwr         => lun%canyon_hwr                       , & ! Input:  [real(r8) (:)   ]  ratio of building height to street width          
-         wtroad_perv        => lun%wtroad_perv                      , & ! Input:  [real(r8) (:)   ]  weight of pervious road wrt total road            
+         ctype              => col_pp%itype                            , & ! Input:  [integer (:)    ]  column type                                        
+         coli               => lun_pp%coli                             , & ! Input:  [integer (:)    ]  beginning column index for landunit                
+         canyon_hwr         => lun_pp%canyon_hwr                       , & ! Input:  [real(r8) (:)   ]  ratio of building height to street width          
+         wtroad_perv        => lun_pp%wtroad_perv                      , & ! Input:  [real(r8) (:)   ]  weight of pervious road wrt total road            
          
-         frac_sno           => waterdiagnosticbulk_inst%frac_sno_col         , & ! Input:  [real(r8) (:)   ]  fraction of ground covered by snow (0 to 1)       
+         frac_sno           => col_ws%frac_sno         , & ! Input:  [real(r8) (:)   ]  fraction of ground covered by snow (0 to 1)       
          
-         alb_roof_dir       => urbanparams_inst%alb_roof_dir        , & ! Output: [real(r8) (:,:) ]  direct roof albedo                              
-         alb_roof_dif       => urbanparams_inst%alb_roof_dif        , & ! Output: [real(r8) (:,:) ]  diffuse roof albedo                             
-         alb_improad_dir    => urbanparams_inst%alb_improad_dir     , & ! Output: [real(r8) (:,:) ]  direct impervious road albedo                   
-         alb_improad_dif    => urbanparams_inst%alb_improad_dif     , & ! Output: [real(r8) (:,:) ]  diffuse imprevious road albedo                  
-         alb_perroad_dir    => urbanparams_inst%alb_perroad_dir     , & ! Output: [real(r8) (:,:) ]  direct pervious road albedo                     
-         alb_perroad_dif    => urbanparams_inst%alb_perroad_dif     , & ! Output: [real(r8) (:,:) ]  diffuse pervious road albedo                    
-         alb_wall_dir       => urbanparams_inst%alb_wall_dir        , & ! Output: [real(r8) (:,:) ]  direct wall albedo                              
-         alb_wall_dif       => urbanparams_inst%alb_wall_dif        , & ! Output: [real(r8) (:,:) ]  diffuse wall albedo                             
+         alb_roof_dir       => urbanparams_vars%alb_roof_dir        , & ! Output: [real(r8) (:,:) ]  direct roof albedo                              
+         alb_roof_dif       => urbanparams_vars%alb_roof_dif        , & ! Output: [real(r8) (:,:) ]  diffuse roof albedo                             
+         alb_improad_dir    => urbanparams_vars%alb_improad_dir     , & ! Output: [real(r8) (:,:) ]  direct impervious road albedo                   
+         alb_improad_dif    => urbanparams_vars%alb_improad_dif     , & ! Output: [real(r8) (:,:) ]  diffuse imprevious road albedo                  
+         alb_perroad_dir    => urbanparams_vars%alb_perroad_dir     , & ! Output: [real(r8) (:,:) ]  direct pervious road albedo                     
+         alb_perroad_dif    => urbanparams_vars%alb_perroad_dif     , & ! Output: [real(r8) (:,:) ]  diffuse pervious road albedo                    
+         alb_wall_dir       => urbanparams_vars%alb_wall_dir        , & ! Output: [real(r8) (:,:) ]  direct wall albedo                              
+         alb_wall_dif       => urbanparams_vars%alb_wall_dif        , & ! Output: [real(r8) (:,:) ]  diffuse wall albedo                             
         
-         sabs_roof_dir      => solarabs_inst%sabs_roof_dir_lun      , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by roof per unit ground area per unit incident flux
-         sabs_roof_dif      => solarabs_inst%sabs_roof_dif_lun      , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by roof per unit ground area per unit incident flux
-         sabs_sunwall_dir   => solarabs_inst%sabs_sunwall_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by sunwall per unit wall area per unit incident flux
-         sabs_sunwall_dif   => solarabs_inst%sabs_sunwall_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by sunwall per unit wall area per unit incident flux
-         sabs_shadewall_dir => solarabs_inst%sabs_shadewall_dir_lun , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by shadewall per unit wall area per unit incident flux
-         sabs_shadewall_dif => solarabs_inst%sabs_shadewall_dif_lun , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by shadewall per unit wall area per unit incident flux
-         sabs_improad_dir   => solarabs_inst%sabs_improad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by impervious road per unit ground area per unit incident flux
-         sabs_improad_dif   => solarabs_inst%sabs_improad_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by impervious road per unit ground area per unit incident flux
-         sabs_perroad_dir   => solarabs_inst%sabs_perroad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by pervious road per unit ground area per unit incident flux
-         sabs_perroad_dif   => solarabs_inst%sabs_perroad_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by pervious road per unit ground area per unit incident flux
+         sabs_roof_dir      => solarabs_vars%sabs_roof_dir_lun      , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by roof per unit ground area per unit incident flux
+         sabs_roof_dif      => solarabs_vars%sabs_roof_dif_lun      , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by roof per unit ground area per unit incident flux
+         sabs_sunwall_dir   => solarabs_vars%sabs_sunwall_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by sunwall per unit wall area per unit incident flux
+         sabs_sunwall_dif   => solarabs_vars%sabs_sunwall_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by sunwall per unit wall area per unit incident flux
+         sabs_shadewall_dir => solarabs_vars%sabs_shadewall_dir_lun , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by shadewall per unit wall area per unit incident flux
+         sabs_shadewall_dif => solarabs_vars%sabs_shadewall_dif_lun , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by shadewall per unit wall area per unit incident flux
+         sabs_improad_dir   => solarabs_vars%sabs_improad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by impervious road per unit ground area per unit incident flux
+         sabs_improad_dif   => solarabs_vars%sabs_improad_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by impervious road per unit ground area per unit incident flux
+         sabs_perroad_dir   => solarabs_vars%sabs_perroad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by pervious road per unit ground area per unit incident flux
+         sabs_perroad_dif   => solarabs_vars%sabs_perroad_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by pervious road per unit ground area per unit incident flux
          
-         fabd               => surfalb_inst%fabd_patch              , & ! Output:  [real(r8) (:,:) ]  flux absorbed by canopy per unit direct flux
-         fabd_sun           => surfalb_inst%fabd_sun_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by sunlit canopy per unit direct flux
-         fabd_sha           => surfalb_inst%fabd_sha_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by shaded canopy per unit direct flux
-         fabi               => surfalb_inst%fabi_patch              , & ! Output:  [real(r8) (:,:) ]  flux absorbed by canopy per unit diffuse flux
-         fabi_sun           => surfalb_inst%fabi_sun_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by sunlit canopy per unit diffuse flux
-         fabi_sha           => surfalb_inst%fabi_sha_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by shaded canopy per unit diffuse flux
-         ftdd               => surfalb_inst%ftdd_patch              , & ! Output:  [real(r8) (:,:) ]  down direct flux below canopy per unit direct flux
-         ftid               => surfalb_inst%ftid_patch              , & ! Output:  [real(r8) (:,:) ]  down diffuse flux below canopy per unit direct flux
-         ftii               => surfalb_inst%ftii_patch              , & ! Output:  [real(r8) (:,:) ]  down diffuse flux below canopy per unit diffuse flux
-         albgrd             => surfalb_inst%albgrd_col              , & ! Output: [real(r8) (:,:) ]  urban col ground albedo (direct) 
-         albgri             => surfalb_inst%albgri_col              , & ! Output: [real(r8) (:,:) ]  urban col ground albedo (diffuse)
-         albd               => surfalb_inst%albd_patch              , & ! Output  [real(r8) (:,:) ]  urban pft surface albedo (direct)                         
-         albi               => surfalb_inst%albi_patch              , & ! Output: [real(r8) (:,:) ]  urban pft surface albedo (diffuse)                        
+         fabd               => surfalb_vars%fabd_patch              , & ! Output:  [real(r8) (:,:) ]  flux absorbed by canopy per unit direct flux
+         fabd_sun           => surfalb_vars%fabd_sun_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by sunlit canopy per unit direct flux
+         fabd_sha           => surfalb_vars%fabd_sha_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by shaded canopy per unit direct flux
+         fabi               => surfalb_vars%fabi_patch              , & ! Output:  [real(r8) (:,:) ]  flux absorbed by canopy per unit diffuse flux
+         fabi_sun           => surfalb_vars%fabi_sun_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by sunlit canopy per unit diffuse flux
+         fabi_sha           => surfalb_vars%fabi_sha_patch          , & ! Output:  [real(r8) (:,:) ]  flux absorbed by shaded canopy per unit diffuse flux
+         ftdd               => surfalb_vars%ftdd_patch              , & ! Output:  [real(r8) (:,:) ]  down direct flux below canopy per unit direct flux
+         ftid               => surfalb_vars%ftid_patch              , & ! Output:  [real(r8) (:,:) ]  down diffuse flux below canopy per unit direct flux
+         ftii               => surfalb_vars%ftii_patch              , & ! Output:  [real(r8) (:,:) ]  down diffuse flux below canopy per unit diffuse flux
+         albgrd             => surfalb_vars%albgrd_col              , & ! Output: [real(r8) (:,:) ]  urban col ground albedo (direct) 
+         albgri             => surfalb_vars%albgri_col              , & ! Output: [real(r8) (:,:) ]  urban col ground albedo (diffuse)
+         albd               => surfalb_vars%albd_patch              , & ! Output  [real(r8) (:,:) ]  urban pft surface albedo (direct)                         
+         albi               => surfalb_vars%albi_patch              , & ! Output: [real(r8) (:,:) ]  urban pft surface albedo (diffuse)                        
          
          begl               => bounds%begl                          , &
-         vf_sr              => urbanparams_inst%vf_sr               , & ! Input:  [real(r8) (:) ]  view factor of sky for road
-         vf_sw              => urbanparams_inst%vf_sw               , & ! Input:  [real(r8) (:) ]  view factor of sky for one wall
          endl               => bounds%endl                            &
          )
 
@@ -170,8 +162,8 @@ contains
       
       do fl = 1,num_urbanl
          l = filter_urbanl(fl)
-         g = lun%gridcell(l)
-         coszen(l) = surfalb_inst%coszen_col(coli(l))  ! Assumes coszen for each column are the same
+         g = lun_pp%gridcell(l)
+         coszen(l) = surfalb_vars%coszen_col(coli(l))  ! Assumes coszen for each column are the same
          zen(l)    = acos(coszen(l))
       end do
 
@@ -186,23 +178,25 @@ contains
 
          do fp = 1,num_urbanp  
             p = filter_urbanp(fp)
-            l = patch%landunit(p)
-            ! Setting albedos to wall and road view factors ensures that urban
-            ! albedo will scale up to 1.0
-            c = patch%column(p)
-            if (col%itype(c) == icol_sunwall) then
-               albd(p,ib) = vf_sw(l)
-               albi(p,ib) = vf_sw(l)
-            else if (col%itype(c) == icol_shadewall) then
-               albd(p,ib) = vf_sw(l)
-               albi(p,ib) = vf_sw(l)
-            else if (col%itype(c) == icol_road_perv .or. col%itype(c) == icol_road_imperv) then
-               albd(p,ib) = vf_sr(l)
-               albi(p,ib) = vf_sr(l)
-            else if (col%itype(c) == icol_roof) then
+            l = veg_pp%landunit(p)
+            c = veg_pp%column(p)
+
+            ! Initialize direct and diffuse albedo such that if the Sun is below
+            ! the horizon, p2g scaling returns an albedo of 1.0.
+            if (col_pp%itype(c) == icol_sunwall) then
+               albd(p,ib) = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+               albi(p,ib) = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+            else if (col_pp%itype(c) == icol_shadewall) then
+               albd(p,ib) = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+               albi(p,ib) = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+            else if (col_pp%itype(c) == icol_road_perv .or. col_pp%itype(c) == icol_road_imperv) then
+               albd(p,ib) = 1._r8 / (3.0_r8)
+               albi(p,ib) = 1._r8 / (3.0_r8)
+            else if (col_pp%itype(c) == icol_roof) then
                albd(p,ib) = 1._r8
                albi(p,ib) = 1._r8
             endif
+
             fabd(p,ib)     = 0._r8
             fabd_sun(p,ib) = 0._r8
             fabd_sha(p,ib) = 0._r8
@@ -248,16 +242,27 @@ contains
             sabs_perroad_dif(l,ib)   = 0._r8
             sref_roof_dir(l,ib)      = 1._r8
             sref_roof_dif(l,ib)      = 1._r8
-            ! Setting sref to wall and road view factors ensures that urban
-            ! albedo will scale up to 1.0
-            sref_sunwall_dir(l,ib)   = vf_sw(l)
-            sref_sunwall_dif(l,ib)   = vf_sw(l)
-            sref_shadewall_dir(l,ib) = vf_sw(l)
-            sref_shadewall_dif(l,ib) = vf_sw(l)
-            sref_improad_dir(l,ib)   = vf_sr(l)
-            sref_improad_dif(l,ib)   = vf_sr(l)
-            sref_perroad_dir(l,ib)   = vf_sr(l)
-            sref_perroad_dif(l,ib)   = vf_sr(l)
+            sref_sunwall_dir(l,ib)   = 1._r8
+            sref_sunwall_dif(l,ib)   = 1._r8
+            sref_shadewall_dir(l,ib) = 1._r8
+            sref_shadewall_dif(l,ib) = 1._r8
+            sref_improad_dir(l,ib)   = 1._r8
+            sref_improad_dif(l,ib)   = 1._r8
+            sref_perroad_dir(l,ib)   = 1._r8
+            sref_perroad_dif(l,ib)   = 1._r8
+
+            ! Initialize direct and diffuse albedos such that if the Sun is below
+            ! the horizon, p2g scaling returns an albedo of 1.0.
+            sref_sunwall_dir(l,ib)   = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+            sref_sunwall_dif(l,ib)   = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+            sref_shadewall_dir(l,ib) = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+            sref_shadewall_dif(l,ib) = 1._r8 / (3.0_r8 * lun_pp%canyon_hwr(l))
+            sref_improad_dir(l,ib)   = 1._r8 / (3.0_r8)
+            sref_improad_dif(l,ib)   = 1._r8 / (3.0_r8)
+            sref_perroad_dir(l,ib)   = 1._r8 / (3.0_r8)
+            sref_perroad_dif(l,ib)   = 1._r8 / (3.0_r8)
+            sref_roof_dir(l,ib)      = 1._r8
+            sref_roof_dif(l,ib)      = 1._r8
          end do
       end do
 
@@ -303,7 +308,7 @@ contains
                  sdif_road(begl:endl, :), &
                  sdif_sunwall(begl:endl, :), &
                  sdif_shadewall(begl:endl, :), &
-                 urbanparams_inst)
+                 urbanparams_vars)
          end if
 
          ! Get snow albedos for roof and impervious and pervious road
@@ -315,8 +320,7 @@ contains
                  ic, &
                  albsnd_roof(begl:endl, :), &
                  albsnd_improad(begl:endl, :), &
-                 albsnd_perroad(begl:endl, :), &
-                 waterstatebulk_inst)
+                 albsnd_perroad(begl:endl, :) )
 
             ic = 1
             call SnowAlbedo(bounds, &
@@ -325,15 +329,14 @@ contains
                  ic, &
                  albsni_roof(begl:endl, :), &
                  albsni_improad(begl:endl, :), &
-                 albsni_perroad(begl:endl, :), &
-                 waterstatebulk_inst)
+                 albsni_perroad(begl:endl, :) )
          end if
 
          ! Combine snow-free and snow albedos
          do ib = 1,numrad
             do fc = 1,num_urbanc
                c = filter_urbanc(fc)
-               l = col%landunit(c)
+               l = col_pp%landunit(c)
                if (ctype(c) == icol_roof) then    
                   alb_roof_dir_s(l,ib) = alb_roof_dir(l,ib)*(1._r8-frac_sno(c))  &
                        + albsnd_roof(l,ib)*frac_sno(c)
@@ -389,11 +392,11 @@ contains
                  sref_sunwall_dif   (begl:endl, :), &
                  sref_shadewall_dif (begl:endl, :), &
                  sref_roof_dif      (begl:endl, :), &
-                 urbanparams_inst, solarabs_inst)
+                 urbanparams_vars, solarabs_vars)
          end if
 
          ! ----------------------------------------------------------------------------
-         ! Map urban output to surfalb_inst components 
+         ! Map urban output to surfalb_vars components 
          ! ----------------------------------------------------------------------------
 
          !  Set albgrd and albgri (ground albedos) and albd and albi (surface albedos)
@@ -401,7 +404,7 @@ contains
          do ib = 1,numrad
             do fc = 1,num_urbanc
                c = filter_urbanc(fc)
-               l = col%landunit(c)
+               l = col_pp%landunit(c)
                if (ctype(c) == icol_roof) then    
                   albgrd(c,ib) = sref_roof_dir(l,ib) 
                   albgri(c,ib) = sref_roof_dif(l,ib) 
@@ -421,7 +424,7 @@ contains
             end do
             do fp = 1,num_urbanp
                p = filter_urbanp(fp)
-               c = patch%column(p)
+               c = veg_pp%column(p)
                albd(p,ib) = albgrd(c,ib)
                albi(p,ib) = albgri(c,ib)
             end do
@@ -435,8 +438,7 @@ contains
   !-----------------------------------------------------------------------
   subroutine SnowAlbedo (bounds          , &
        num_urbanc, filter_urbanc, coszen, ind , &
-       albsn_roof, albsn_improad, albsn_perroad, &
-       waterstatebulk_inst)
+       albsn_roof, albsn_improad, albsn_perroad )
     !
     ! !DESCRIPTION:
     ! Determine urban snow albedos
@@ -453,11 +455,9 @@ contains
     real(r8), intent(out):: albsn_roof    ( bounds%begl: , 1: ) ! roof snow albedo by waveband [landunit, numrad]
     real(r8), intent(out):: albsn_improad ( bounds%begl: , 1: ) ! impervious road snow albedo by waveband [landunit, numrad]
     real(r8), intent(out):: albsn_perroad ( bounds%begl: , 1: ) ! pervious road snow albedo by waveband [landunit, numrad]
-    type(waterstatebulk_type), intent(in) :: waterstatebulk_inst
     !
     ! !LOCAL VARIABLES:
     integer  :: fc,c,l              ! indices
-    real(r8) :: h2osno_total(bounds%begc:bounds%endc)  ! total snow water (mm H2O)
     !
     ! These values are derived from Marshall (1989) assuming soot content of 1.5e-5 
     ! (three times what LSM uses globally). Note that snow age effects are ignored here.
@@ -467,45 +467,42 @@ contains
 
     ! this code assumes that numrad = 2 , with the following
     ! index values: 1 = visible, 2 = NIR
-    SHR_ASSERT_ALL_FL(numrad == 2, sourcefile, __LINE__)
 
     ! Enforce expected array sizes
-    SHR_ASSERT_ALL_FL((ubound(coszen)        == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(albsn_roof)    == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(albsn_improad) == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(albsn_perroad) == (/bounds%endl, numrad/)), sourcefile, __LINE__)
 
-    call waterstatebulk_inst%CalculateTotalH2osno(bounds, num_urbanc, filter_urbanc, &
-         caller = 'UrbanAlbedoMod:SnowAlbedo', &
-         h2osno_total = h2osno_total(bounds%begc:bounds%endc))
+    associate(                            & 
+         h2osno =>  col_ws%h2osno & ! Input:  [real(r8) (:) ]  snow water (mm H2O)                               
+         )
+      
+      do fc = 1,num_urbanc
+         c = filter_urbanc(fc)
+         l = col_pp%landunit(c)
+         if (coszen(l) > 0._r8 .and. h2osno(c) > 0._r8) then
+            if (col_pp%itype(c) == icol_roof) then
+               albsn_roof(l,1) = snal0
+               albsn_roof(l,2) = snal1
+            else if (col_pp%itype(c) == icol_road_imperv) then
+               albsn_improad(l,1) = snal0
+               albsn_improad(l,2) = snal1
+            else if (col_pp%itype(c) == icol_road_perv) then
+               albsn_perroad(l,1) = snal0
+               albsn_perroad(l,2) = snal1
+            end if
+         else
+            if (col_pp%itype(c) == icol_roof) then
+               albsn_roof(l,1) = 0._r8
+               albsn_roof(l,2) = 0._r8
+            else if (col_pp%itype(c) == icol_road_imperv) then
+               albsn_improad(l,1) = 0._r8
+               albsn_improad(l,2) = 0._r8
+            else if (col_pp%itype(c) == icol_road_perv) then
+               albsn_perroad(l,1) = 0._r8
+               albsn_perroad(l,2) = 0._r8
+            end if
+         end if
+      end do
 
-    do fc = 1,num_urbanc
-       c = filter_urbanc(fc)
-       l = col%landunit(c)
-       if (coszen(l) > 0._r8 .and. h2osno_total(c) > 0._r8) then
-          if (col%itype(c) == icol_roof) then
-             albsn_roof(l,1) = snal0
-             albsn_roof(l,2) = snal1
-          else if (col%itype(c) == icol_road_imperv) then
-             albsn_improad(l,1) = snal0
-             albsn_improad(l,2) = snal1
-          else if (col%itype(c) == icol_road_perv) then
-             albsn_perroad(l,1) = snal0
-             albsn_perroad(l,2) = snal1
-          end if
-       else
-          if (col%itype(c) == icol_roof) then
-             albsn_roof(l,1) = 0._r8
-             albsn_roof(l,2) = 0._r8
-          else if (col%itype(c) == icol_road_imperv) then
-             albsn_improad(l,1) = 0._r8
-             albsn_improad(l,2) = 0._r8
-          else if (col%itype(c) == icol_road_perv) then
-             albsn_perroad(l,1) = 0._r8
-             albsn_perroad(l,2) = 0._r8
-          end if
-       end if
-    end do
+    end associate
 
   end subroutine SnowAlbedo
 
@@ -545,7 +542,7 @@ contains
     ! and all solar zenith angles from 1 to 90 deg by 1
     !
     ! !USES:
-    use clm_varcon, only : rpi
+    use elm_varcon, only : rpi
     !
     ! !ARGUMENTS:
     type(bounds_type), intent(in) :: bounds                      
@@ -575,14 +572,6 @@ contains
     real(r8) :: zen0                            ! critical solar zenith angle for which sun begins to illuminate road
     !-----------------------------------------------------------------------
 
-    ! Enforce expected array sizes
-    SHR_ASSERT_ALL_FL((ubound(canyon_hwr)     == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(coszen)         == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(zen)            == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir)           == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir_road)      == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir_sunwall)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir_shadewall) == (/bounds%endl, numrad/)), sourcefile, __LINE__)
 
     do fl = 1,num_urbanl
        l = filter_urbanl(fl)
@@ -622,8 +611,8 @@ contains
           if (coszen(l) > 0._r8) then
              if (abs(err1(l)) > 0.001_r8) then
                 write (iulog,*) 'urban direct beam solar radiation balance error',err1(l)
-                write (iulog,*) 'clm model is stopping'
-                call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+                write (iulog,*) 'elm model is stopping'
+                call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
              endif
           endif
        end do
@@ -659,13 +648,13 @@ contains
              if (coszen(l) > 0._r8) then
                 if (abs(err2(l)) > 0.0006_r8 ) then
                    write (iulog,*) 'urban road incident direct beam solar radiation error',err2(l)
-                   write (iulog,*) 'clm model is stopping'
-                   call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+                   write (iulog,*) 'elm model is stopping'
+                   call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
                 endif
                 if (abs(err3(l)) > 0.0006_r8 ) then
                    write (iulog,*) 'urban wall incident direct beam solar radiation error',err3(l)
-                   write (iulog,*) 'clm model is stopping'
-                   call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+                   write (iulog,*) 'elm model is stopping'
+                   call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
                 end if
              end if
           end do
@@ -679,7 +668,7 @@ contains
   subroutine incident_diffuse (bounds, &
        num_urbanl, filter_urbanl, canyon_hwr, &
        sdif, sdif_road, sdif_sunwall, sdif_shadewall, &
-       urbanparams_inst)
+       urbanparams_vars)
     !
     ! !DESCRIPTION: 
     ! Diffuse solar radiation incident on walls and road in urban canyon
@@ -696,7 +685,7 @@ contains
     real(r8)              , intent(out) :: sdif_road      ( bounds%begl: , 1: ) ! diffuse solar radiation incident on road [landunit, numrad]
     real(r8)              , intent(out) :: sdif_sunwall   ( bounds%begl: , 1: ) ! diffuse solar radiation (per unit wall area) incident on sunlit wall [landunit, numrad]
     real(r8)              , intent(out) :: sdif_shadewall ( bounds%begl: , 1: ) ! diffuse solar radiation (per unit wall area) incident on shaded wall [landunit, numrad]
-    type(urbanparams_type), intent(in)  :: urbanparams_inst
+    type(urbanparams_type), intent(in)  :: urbanparams_vars
     !
     ! !LOCAL VARIABLES:
     integer  :: l, fl, ib       ! indices      
@@ -705,15 +694,15 @@ contains
     !-----------------------------------------------------------------------
 
     ! Enforce expected array sizes
-    SHR_ASSERT_ALL_FL((ubound(canyon_hwr)     == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif)           == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif_road)      == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif_sunwall)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif_shadewall) == (/bounds%endl, numrad/)), sourcefile, __LINE__)
+    SHR_ASSERT_ALL((ubound(canyon_hwr)     == (/bounds%endl/)),         errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(sdif)           == (/bounds%endl, numrad/)), errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(sdif_road)      == (/bounds%endl, numrad/)), errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(sdif_sunwall)   == (/bounds%endl, numrad/)), errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(sdif_shadewall) == (/bounds%endl, numrad/)), errMsg(__FILE__, __LINE__))
 
     associate(                            & 
-         vf_sr =>    urbanparams_inst%vf_sr , & ! Input:  [real(r8) (:) ]  view factor of sky for road                       
-         vf_sw =>    urbanparams_inst%vf_sw   & ! Input:  [real(r8) (:) ]  view factor of sky for one wall                   
+         vf_sr =>    urbanparams_vars%vf_sr , & ! Input:  [real(r8) (:) ]  view factor of sky for road                       
+         vf_sw =>    urbanparams_vars%vf_sw   & ! Input:  [real(r8) (:) ]  view factor of sky for one wall                   
          )
 
       do ib = 1, numrad
@@ -736,8 +725,8 @@ contains
             l = filter_urbanl(fl)
             if (abs(err(l)) > 0.001_r8) then
                write (iulog,*) 'urban diffuse solar radiation balance error',err(l) 
-               write (iulog,*) 'clm model is stopping'
-               call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+               write (iulog,*) 'elm model is stopping'
+               call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
             endif
          end do
 
@@ -756,7 +745,7 @@ contains
        sdif_road, sdif_sunwall, sdif_shadewall,                                                  &
        sref_improad_dir, sref_perroad_dir, sref_sunwall_dir, sref_shadewall_dir, sref_roof_dir , &
        sref_improad_dif, sref_perroad_dif, sref_sunwall_dif, sref_shadewall_dif, sref_roof_dif , &
-       urbanparams_inst, solarabs_inst)
+       urbanparams_vars, solarabs_vars)
     !
     ! !DESCRIPTION: 
     ! Solar radiation absorbed by road and both walls in urban canyon allowing 
@@ -795,8 +784,8 @@ contains
     real(r8), intent(inout) :: sref_shadewall_dif ( bounds%begl: , 1: ) ! diffuse solar rad reflected by shadewall (per unit wall area) per unit incident flux [landunit, numrad]
     real(r8), intent(inout) :: sref_roof_dir      ( bounds%begl: , 1: ) ! direct  solar rad reflected by roof (per unit ground area) per unit incident flux [landunit, numrad]
     real(r8), intent(inout) :: sref_roof_dif      ( bounds%begl: , 1: ) ! diffuse solar rad reflected by roof (per unit ground area)  per unit incident flux [landunit, numrad]
-    type(urbanparams_type), intent(in)    :: urbanparams_inst
-    type(solarabs_type)   , intent(inout) :: solarabs_inst
+    type(urbanparams_type), intent(in)    :: urbanparams_vars
+    type(solarabs_type)   , intent(inout) :: solarabs_vars
     !
     ! !LOCAL VARIABLES
     real(r8) :: wtroad_imperv(bounds%begl:bounds%endl)           ! weight of impervious road wrt total road
@@ -878,54 +867,24 @@ contains
     real(r8), parameter :: errcrit  = .00001_r8  ! error criteria
     !-----------------------------------------------------------------------
 
-    ! Enforce expected array sizes
-    SHR_ASSERT_ALL_FL((ubound(coszen)             == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(canyon_hwr)         == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(wtroad_perv)        == (/bounds%endl/)),         sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir)               == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif)               == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_improad_dir)    == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_perroad_dir)    == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_wall_dir)       == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_roof_dir)       == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_improad_dif)    == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_perroad_dif)    == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_wall_dif)       == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(alb_roof_dif)       == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir_road)          == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir_sunwall)       == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdir_shadewall)     == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif_road)          == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif_sunwall)       == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sdif_shadewall)     == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_improad_dir)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_perroad_dir)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_improad_dif)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_perroad_dif)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_sunwall_dir)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_sunwall_dif)   == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_shadewall_dir) == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_shadewall_dif) == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_roof_dir)      == (/bounds%endl, numrad/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(sref_roof_dif)      == (/bounds%endl, numrad/)), sourcefile, __LINE__)
 
     associate(                                                           & 
-         vf_sr              =>    urbanparams_inst%vf_sr               , & ! Input:  [real(r8) (:)   ]  view factor of sky for road                       
-         vf_wr              =>    urbanparams_inst%vf_wr               , & ! Input:  [real(r8) (:)   ]  view factor of one wall for road                  
-         vf_sw              =>    urbanparams_inst%vf_sw               , & ! Input:  [real(r8) (:)   ]  view factor of sky for one wall                   
-         vf_rw              =>    urbanparams_inst%vf_rw               , & ! Input:  [real(r8) (:)   ]  view factor of road for one wall                  
-         vf_ww              =>    urbanparams_inst%vf_ww               , & ! Input:  [real(r8) (:)   ]  view factor of opposing wall for one wall         
+         vf_sr              =>    urbanparams_vars%vf_sr               , & ! Input:  [real(r8) (:)   ]  view factor of sky for road                       
+         vf_wr              =>    urbanparams_vars%vf_wr               , & ! Input:  [real(r8) (:)   ]  view factor of one wall for road                  
+         vf_sw              =>    urbanparams_vars%vf_sw               , & ! Input:  [real(r8) (:)   ]  view factor of sky for one wall                   
+         vf_rw              =>    urbanparams_vars%vf_rw               , & ! Input:  [real(r8) (:)   ]  view factor of road for one wall                  
+         vf_ww              =>    urbanparams_vars%vf_ww               , & ! Input:  [real(r8) (:)   ]  view factor of opposing wall for one wall         
 
-         sabs_roof_dir      =>    solarabs_inst%sabs_roof_dir_lun      , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by roof per unit ground area per unit incident flux
-         sabs_roof_dif      =>    solarabs_inst%sabs_roof_dif_lun      , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by roof per unit ground area per unit incident flux
-         sabs_sunwall_dir   =>    solarabs_inst%sabs_sunwall_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by sunwall per unit wall area per unit incident flux
-         sabs_sunwall_dif   =>    solarabs_inst%sabs_sunwall_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by sunwall per unit wall area per unit incident flux
-         sabs_shadewall_dir =>    solarabs_inst%sabs_shadewall_dir_lun , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by shadewall per unit wall area per unit incident flux
-         sabs_shadewall_dif =>    solarabs_inst%sabs_shadewall_dif_lun , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by shadewall per unit wall area per unit incident flux
-         sabs_improad_dir   =>    solarabs_inst%sabs_improad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by impervious road per unit ground area per unit incident flux
-         sabs_improad_dif   =>    solarabs_inst%sabs_improad_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by impervious road per unit ground area per unit incident flux
-         sabs_perroad_dir   =>    solarabs_inst%sabs_perroad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by pervious road per unit ground area per unit incident flux
-         sabs_perroad_dif   =>    solarabs_inst%sabs_perroad_dif_lun     & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by pervious road per unit ground area per unit incident flux
+         sabs_roof_dir      =>    solarabs_vars%sabs_roof_dir_lun      , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by roof per unit ground area per unit incident flux
+         sabs_roof_dif      =>    solarabs_vars%sabs_roof_dif_lun      , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by roof per unit ground area per unit incident flux
+         sabs_sunwall_dir   =>    solarabs_vars%sabs_sunwall_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by sunwall per unit wall area per unit incident flux
+         sabs_sunwall_dif   =>    solarabs_vars%sabs_sunwall_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by sunwall per unit wall area per unit incident flux
+         sabs_shadewall_dir =>    solarabs_vars%sabs_shadewall_dir_lun , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by shadewall per unit wall area per unit incident flux
+         sabs_shadewall_dif =>    solarabs_vars%sabs_shadewall_dif_lun , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by shadewall per unit wall area per unit incident flux
+         sabs_improad_dir   =>    solarabs_vars%sabs_improad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by impervious road per unit ground area per unit incident flux
+         sabs_improad_dif   =>    solarabs_vars%sabs_improad_dif_lun   , & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by impervious road per unit ground area per unit incident flux
+         sabs_perroad_dir   =>    solarabs_vars%sabs_perroad_dir_lun   , & ! Output: [real(r8) (:,:) ]  direct  solar absorbed  by pervious road per unit ground area per unit incident flux
+         sabs_perroad_dif   =>    solarabs_vars%sabs_perroad_dif_lun     & ! Output: [real(r8) (:,:) ]  diffuse solar absorbed  by pervious road per unit ground area per unit incident flux
          )
 
       ! Calculate impervious road
@@ -1135,8 +1094,8 @@ contains
                end do
                if (iter_dir >= n) then
                   write (iulog,*) 'urban net solar radiation error: no convergence, direct beam'
-                  write (iulog,*) 'clm model is stopping'
-                  call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+                  write (iulog,*) 'elm model is stopping'
+                  call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
                endif
 
                ! reflected diffuse
@@ -1207,8 +1166,8 @@ contains
                end do
                if (iter_dif >= n) then
                   write (iulog,*) 'urban net solar radiation error: no convergence, diffuse'
-                  write (iulog,*) 'clm model is stopping'
-                  call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+                  write (iulog,*) 'elm model is stopping'
+                  call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
                endif
 
                ! total reflected by canyon - sum of solar reflection to sky from canyon.
@@ -1253,8 +1212,8 @@ contains
                   write(iulog,*)' sabs_canyon_dif = ',sabs_canyon_dif(l)
                   write(iulog,*)' sref_canyon_dir = ',sref_canyon_dir(l)
                   write(iulog,*)' sref_canyon_dif = ',sref_canyon_dir(l)
-                  write(iulog,*) 'clm model is stopping'
-                  call endrun(subgrid_index=l, subgrid_level=subgrid_level_landunit, msg=errmsg(sourcefile, __LINE__))
+                  write(iulog,*) 'elm model is stopping'
+                  call endrun(decomp_index=l, elmlevel=namel, msg=errmsg(__FILE__, __LINE__))
                endif
 
                ! canyon albedo

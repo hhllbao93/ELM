@@ -14,11 +14,12 @@ module dynColumnTemplateMod
   ! !USES:
 #include "shr_assert.h"
   use shr_kind_mod    , only : r8 => shr_kind_r8
+  use shr_log_mod     , only : errMsg => shr_log_errMsg
   use decompMod       , only : bounds_type
-  use GridcellType    , only : grc
-  use LandunitType    , only : lun
-  use ColumnType      , only : col
-  use clm_varcon      , only : ispval
+  use GridcellType    , only : grc_pp
+  use LandunitType    , only : lun_pp
+  use ColumnType      , only : col_pp
+  use elm_varcon      , only : ispval
 
   !
   ! !PUBLIC MEMBER FUNCTIONS:
@@ -44,6 +45,7 @@ module dynColumnTemplateMod
 
   ! if no template column was found, this value is returned
   integer, parameter, public :: TEMPLATE_NONE_FOUND = ispval
+  !$acc declare copyin(TEMPLATE_NONE_FOUND)
 
   character(len=*), parameter, private :: sourcefile = &
        __FILE__
@@ -71,7 +73,7 @@ contains
     ! first time in this time step.
     !
     ! !USES:
-    !
+    !$acc routine seq
     ! !ARGUMENTS:
     integer :: c_template  ! function return value
 
@@ -83,23 +85,23 @@ contains
     ! !LOCAL VARIABLES:
     logical :: found  ! whether a suitable template column has been found
     integer :: g,l,c  ! indices of grid cell, landunit, column
-    
-    character(len=*), parameter :: subname = 'template_col_from_landunit'
+
+    !character(len=*), parameter :: subname = 'template_col_from_landunit'
     !-----------------------------------------------------------------------
-    
-    SHR_ASSERT_ALL_FL((ubound(cactive) == (/bounds%endc/)), sourcefile, __LINE__)
+
+    !SHR_ASSERT_ALL((ubound(cactive) == (/bounds%endc/)), errMsg(sourcefile, __LINE__))
 
     found = .false.
-    g = col%gridcell(c_target)
-    l = grc%landunit_indices(landunit_type, g)
+    g = col_pp%gridcell(c_target)
+    l = grc_pp%landunit_indices(landunit_type, g)
 
     ! If this landunit exists on this grid cell...
     if (l /= ispval) then
 
        ! Loop through columns on this landunit; stop if as soon as we find an active
        ! column: that will serve as the template
-       c = lun%coli(l)
-       do while (.not. found .and. c <= lun%colf(l))
+       c = lun_pp%coli(l)
+       do while (.not. found .and. c <= lun_pp%colf(l))
           if (cactive(c)) then
              found = .true.
           else
@@ -137,7 +139,7 @@ contains
     ! should not be used.
     !
     ! See also the notes about cactive under 'template_col_from_landunit'.
-    !
+    !$acc routine seq
     ! !USES:
     use landunit_varcon, only : istsoil
     !
@@ -149,11 +151,11 @@ contains
     ! !LOCAL VARIABLES:
     integer :: c
 
-    character(len=*), parameter :: subname = 'template_col_from_natveg_array'
+    !character(len=*), parameter :: subname = 'template_col_from_natveg_array'
     !-----------------------------------------------------------------------
 
-    SHR_ASSERT_ALL_FL((ubound(cactive) == (/bounds%endc/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(c_templates) == (/bounds%endc/)), sourcefile, __LINE__)
+    !SHR_ASSERT_ALL((ubound(cactive) == (/bounds%endc/)), errMsg(sourcefile, __LINE__))
+    !SHR_ASSERT_ALL((ubound(c_templates) == (/bounds%endc/)), errMsg(sourcefile, __LINE__))
 
     do c = bounds%begc, bounds%endc
        c_templates(c) = template_col_from_landunit(bounds, c, istsoil, &
@@ -162,6 +164,6 @@ contains
 
   end subroutine template_col_from_natveg_array
 
-  
+
 
 end module dynColumnTemplateMod

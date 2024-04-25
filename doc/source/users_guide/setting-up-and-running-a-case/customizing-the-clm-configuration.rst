@@ -197,7 +197,7 @@ CLM_BLDNML_OPTS
                               "-mask list" to list valid land masks.
      -namelist "namelist"     Specify namelist settings directly on the commandline by supplying 
                               a string containing FORTRAN namelist syntax, e.g.,
-                                 -namelist "&clm_inparm dt=1800 /"
+                                 -namelist "&elm_inparm dt=1800 /"
      -no-megan                DO NOT PRODUCE a megan_emis_nl namelist that will go into the
                               "drv_flds_in" file for the driver to pass VOCs to the atm.
                               MEGAN (Model of Emissions of Gases and Aerosols from Nature)

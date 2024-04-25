@@ -49,7 +49,7 @@ require Build::NamelistDefinition;
 require queryDefaultXML;
 
 # Defaults
-my $namelist = "clm_inparm";
+my $namelist = "elm_inparm";
 my $config = "config_cache.xml";
 
 

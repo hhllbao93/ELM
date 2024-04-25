@@ -7,10 +7,11 @@ module BandDiagonalMod
   ! Band Diagonal matrix solution
   !
   ! !USES:
+  use shr_log_mod    , only : errMsg => shr_log_errMsg
   use decompMod      , only : bounds_type
   use abortutils     , only : endrun
   use shr_kind_mod   , only : r8 => shr_kind_r8
-  use clm_varctl     , only : iulog
+  use elm_varctl     , only : iulog
   !
   ! !PUBLIC TYPES:
   implicit none
@@ -18,9 +19,6 @@ module BandDiagonalMod
   !
   ! !PUBLIC MEMBER FUNCTIONS:
   public :: BandDiagonal
-
-  character(len=*), parameter, private :: sourcefile = &
-       __FILE__
   !-----------------------------------------------------------------------
 
 contains
@@ -54,11 +52,11 @@ contains
     !-----------------------------------------------------------------------
 
     ! Enforce expected array sizes
-    SHR_ASSERT_ALL_FL((ubound(jtop) == (/bounds%endc/)),             sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(jbot) == (/bounds%endc/)),             sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(b)    == (/bounds%endc, nband, ubj/)), sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(r)    == (/bounds%endc, ubj/)),        sourcefile, __LINE__)
-    SHR_ASSERT_ALL_FL((ubound(u)    == (/bounds%endc, ubj/)),        sourcefile, __LINE__)
+    SHR_ASSERT_ALL((ubound(jtop) == (/bounds%endc/)),             errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(jbot) == (/bounds%endc/)),             errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(b)    == (/bounds%endc, nband, ubj/)), errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(r)    == (/bounds%endc, ubj/)),        errMsg(__FILE__, __LINE__))
+    SHR_ASSERT_ALL((ubound(u)    == (/bounds%endc, ubj/)),        errMsg(__FILE__, __LINE__))
 
 
 !!$     SUBROUTINE SGBSV( N, KL, KU, NRHS, AB, LDAB, IPIV, B, LDB, INFO )
@@ -176,7 +174,7 @@ contains
        n=jbot(ci)-jtop(ci)+1
 
        allocate(ab(m,n))
-       ab=0.0_r8
+       ab=0.0
 
        ab(kl+ku-1,3:n)=b(ci,1,jtop(ci):jbot(ci)-2)   ! 2nd superdiagonal
        ab(kl+ku+0,2:n)=b(ci,2,jtop(ci):jbot(ci)-1)   ! 1st superdiagonal
@@ -209,7 +207,7 @@ contains
              write(iulog,'(i2,5f18.7)') j,temp(3:7,j)
           enddo
           write(iulog,*) ''
-          call endrun( 'BandDiagonal ERROR: dgbsv returned error code' )
+          stop
        endif
        deallocate(temp)
 
