@@ -1,6 +1,6 @@
 # Getting started with offline ELM land only (to be used with WRF)
 
-## 1. To compile ELM with MPI, ParallelIO(PIO) and ESMF is needed
+## 1. To compile ELM with MPI, ParallelIO(PIO) and ESMF are needed
 
 ### Compile ParallelIO (PIO) library (v2.5.9 is used as an example)
 Get the code
@@ -28,16 +28,37 @@ After it builds successfully, change the directory to the code folder
 ```
  
 ### Compile ESMF: (v8.4.2 is used as an example)
+Get code for ESMF
 ```
-   git clone git@github.com:esmf-org/esmf.git  
-   cp /PATH/TO/ELM_CODE/tools/esmf-build-perlmutter.sh` /PATH/TO/ESMF_CODE # Copy this `esmf-build-perlmutter.sh` to inside the unzipped directory
-   vim esmf-build-perlmutter.sh  # Update the file paths in esmf-build-perlmutter.sh
-   sh esmf-build-perlmutter.sh   # with the last line saying “make”
-   sh esmf-build-perlmutter.sh   # with the last line saying “make install”
-   # make ESMF accessible as a module:
-   cp esmf-perlmutter-modulefile ./esmf # Copy this `esmf-perlmutter-modulefile` into a directory named `esmf`
-   mv esmf-perlmutter-modulefile perlmutter-8.4.2 # Update the name of this file to `perlmutter-8.4.2`
-   vim perlmutter-8.4.2 # Update the paths in the file to point to where you installed PIO and ESMF
+   git clone git@github.com:esmf-org/esmf.git
+```
+Copy `esmf-build-perlmutter.sh` to inside the ESMF_CODE  directory
+```
+   cp /PATH/TO/ELM_CODE/tools/esmf-build-perlmutter.sh` /PATH/TO/ESMF_CODE
+```
+Update the ESMF_DIR, PIO, ESMF_INSTALL_PREFIX, ESMF_PIO_INCLUDE, ESMF_PIO_LIBPATH in esmf-build-perlmutter.sh
+``` 
+   vim esmf-build-perlmutter.sh
+```
+with the last line saying “make”
+```
+   sh esmf-build-perlmutter.sh
+```
+with the last line saying “make install”
+```
+   sh esmf-build-perlmutter.sh
+```
+make ESMF accessible as a module
+Copy the  `esmf-perlmutter-modulefile` into a directory named `esmf`
+```
+   cp esmf-perlmutter-modulefile ./esmf
+```
+Update the name of this file to `perlmutter-8.4.2`
+```
+   mv esmf-perlmutter-modulefile perlmutter-8.4.2
+Update the paths in the file to point to where you installed PIO and ESMF
+```
+   vim perlmutter-8.4.2 
 ```
 
 ## 2. Clone ELM and WRF code 
