@@ -1,6 +1,8 @@
 # Getting started with offline ELM land only (to be used with WRF)
 
+
 ## 1. Install ParallelIO(PIO) and ESMF, which is necessary to compile ELM with MPI
+
 
 ### Compile ParallelIO (PIO) library (v2.5.9 is used as an example)
 Get the code
@@ -25,6 +27,7 @@ After it builds successfully, change the directory to the code folder
    make
    make install
 ```
+
  
 ### Compile ESMF: (v8.4.2 is used as an example)
 Get code for ESMF
@@ -62,6 +65,7 @@ Update the paths in the file to point to where you installed PIO and ESMF
 ```
 
 ## 2. Build ELM and WRF
+
 ### Clone ELM and WRF code 
 Clone the WRF repository and checkout develop branch:
 ```
@@ -75,6 +79,7 @@ Clone the ELM repository:
     git clone https://github.com/hhllbao93/ELM.git ELM
     cd ELM
 ```
+
 
 ### Build ELM and its dependencies
 In your ELM code directory, build ELM and its dependencies. Currently, we only support building WRF-ELM on Perlmutter with gnu
@@ -99,6 +104,7 @@ Changes need to be made in /PATH/TO/ELM_CODE/ccs_config/machines/config_machines
         <command name="load">esmf/perlmutter-8.4.2</command>
       </modules>
 ```
+
 
 ### Building WRF with ELM
 Load the same modules and set the same environments as used for ELM build by sourcing elm_build_environment.sh for Bash:
