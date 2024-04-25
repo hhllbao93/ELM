@@ -1,58 +1,62 @@
-# CTSM
+# Getting started with offline ELM land only (to be used with WRF)
 
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.3739617.svg)](https://doi.org/10.5281/zenodo.3739617)
+## 1. To compile ELM with MPI, ParallelIO(PIO) and ESMF is needed
 
-## Overview and resources
+### Compile ParallelIO (PIO) library (v2.5.9 is used as an example)
+```
+   git clone git@github.com:NCAR/ParallelIO.git
+   cp /PATH/TO/ELM_CODE/tools/pio-build-perlmutter.sh ./  # Copy this `pio-build-perlmutter.sh` script to the parent directory of the unzipped code
+   vim pio-build-perlmutter.sh  # Update the file paths of unzipped code   
+   sh pio-build-perlmutter.sh   # the -S should point to where the code is, and the -B should point to where you want it to build
+   # After it builds successfully, change directory to the build folder 
+   make
+   make install
+```
+ 
+### Compile ESMF: (v8.4.2 is used as an example)
+```
+   git clone git@github.com:esmf-org/esmf.git  
+   cp /PATH/TO/ELM_CODE/tools/esmf-build-perlmutter.sh` /PATH/TO/ESMF_CODE # Copy this `esmf-build-perlmutter.sh` to inside the unzipped directory
+   vim esmf-build-perlmutter.sh  # Update the file paths in esmf-build-perlmutter.sh
+   sh esmf-build-perlmutter.sh   # with the last line saying “make”
+   sh esmf-build-perlmutter.sh   # with the last line saying “make install”
+   # make ESMF accessible as a module:
+   cp esmf-perlmutter-modulefile ./esmf # Copy this `esmf-perlmutter-modulefile` into a directory named `esmf`
+   mv esmf-perlmutter-modulefile perlmutter-8.4.2 # Update the name of this file to `perlmutter-8.4.2`
+   vim perlmutter-8.4.2 # Update the paths in the file to point to where you installed PIO and ESMF
+```
 
-The Community Terrestrial Systems Model.
+## 2. Clone ELM and WRF code 
+### Clone the WRF repository and checkout develop branch:
+```
+    git clone https://github.com/wrf-model/WRF.git WRF-ELM
+    cd WRF-ELM
+    git checkout develop
+```
 
-This includes the Community Land Model (CLM5.0 and CLM4.5) of the Community Earth System Model.
+### Clone the ELM repository:
+```
+    git clone https://github.com/hhllbao93/E3SM.git ELM
+    cd ELM
+    ./manage_externals/checkout_externals 
+```
 
-For documentation, quick start, diagnostics, model output and
-references, see
+## 3. Build ELM and its dependencies
+### In your ELM directory, build ELM and its dependencies. Currently we only support build WRF-ELM on Perlmutter with gnu
+```
+    ./lilac/build_ctsm /PATH/TO/ELM/BUILD --machine perlmutter --compiler gnu
+```
 
-http://www.cesm.ucar.edu/models/cesm2.0/land/
-
-and
-
-https://escomp.github.io/ctsm-docs/
-
-For help with how to work with CTSM in git, see
-
-https://github.com/ESCOMP/CTSM/wiki/Quick-start-to-CTSM-development-with-git
-
-and
-
-https://github.com/ESCOMP/ctsm/wiki/Recommended-git-setup
-
-For support with model use, troubleshooting, etc., please use the [CTSM
-forum](https://bb.cgd.ucar.edu/cesm/forums/ctsm-clm-mosart-rtm.134/) or other appropriate forum (e.g., for
-infrastructure/porting questions) through the [CESM forums](https://bb.cgd.ucar.edu/cesm/).
-
-To get updates on CTSM tags and important notes on CTSM developments
-join our low traffic email list:
-
-https://groups.google.com/a/ucar.edu/forum/#!forum/ctsm-dev
-
-(Send email to ctsm-software@ucar.edu if you have problems with any of this)
-
-## CTSM code management team
-
-CTSM code management is provided primarily by:
-
-Software engineering team:
-- [Erik Kluzek](https://github.com/ekluzek)
-- [Bill Sacks](https://github.com/billsacks)
-- [Sam Levis](https://github.com/slevisconsulting)
-- [Adrianna Foster](https://github.com/adrifoster)
-
-Science team:
-- [Dave Lawrence](https://github.com/dlawrenncar)
-- [Will Wieder](https://github.com/wwieder)
-- [Danica Lombardozzi](https://github.com/danicalombardozzi)
-- [Keith Oleson](https://github.com/olyson)
-- [Sean Swenson](https://github.com/swensosc)
-- [Jackie Shuman](https://github.com/jkshuman)
-- [Peter Lawrence](https://github.com/lawrencepj1)
-- [Rosie Fisher](https://github.com/rosiealice)
-- Gordon Bonan
+## 4. Building WRF with ELM
+### Load the same modules and set the same environments as used for ELM build by sourcing elm_build_environment.sh for Bash:
+```
+    source elm_build_dir/elm_build_environment.sh
+```
+### Set makefile variables from ELM needed for the WRF build by setting the following environment. For example for Bash
+```
+    export WRF_ELM_MKFILE=/glade/scratch/$USER/WRF-ELM/ELM/elm_build_dir/bld/elm.mk
+```
+### Compile the code using build_WRF.sh
+```
+    sh build_WRF.sh
+```
