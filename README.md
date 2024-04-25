@@ -11,11 +11,11 @@ Copy this `pio-build-perlmutter.sh` script to the parent directory of the unzipp
 ```
    cp /PATH/TO/ELM_CODE/tools/pio-build-perlmutter.sh ./  
 ```
-Update the file paths of unzipped code 
+Update the file paths of unzipped code by changing -DCMAKE_INSTALL_PREFIX=/PATH/TO/PIO/BUILD
+(the -S should point to where the code is, and the -B should point to where you want it to build)
 ```
    vim pio-build-perlmutter.sh
-   #by changing -DCMAKE_INSTALL_PREFIX=/global/cfs/cdirs/m3878/hhllbao/pio/perlmutter-2.5.9
-   # the -S should point to where the code is, and the -B should point to where you want it to build
+
 ```
 Run pio-build-perlmutter.sh
 ```
