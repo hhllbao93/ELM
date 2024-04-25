@@ -15,7 +15,6 @@ Update the file paths of unzipped code by changing -DCMAKE_INSTALL_PREFIX=/PATH/
 (the -S should point to where the code is, and the -B should point to where you want it to build)
 ```
    vim pio-build-perlmutter.sh
-
 ```
 Run pio-build-perlmutter.sh
 ```
@@ -40,15 +39,15 @@ Update the ESMF_DIR, PIO, ESMF_INSTALL_PREFIX, ESMF_PIO_INCLUDE, ESMF_PIO_LIBPAT
 ``` 
    vim esmf-build-perlmutter.sh
 ```
-with the last line saying “make”
+With the last line saying “make”
 ```
    sh esmf-build-perlmutter.sh
 ```
-with the last line saying “make install”
+With the last line saying “make install”
 ```
    sh esmf-build-perlmutter.sh
 ```
-make ESMF accessible as a module
+Make ESMF accessible as a module
 Copy the  `esmf-perlmutter-modulefile` into a directory named `esmf`
 ```
    cp esmf-perlmutter-modulefile ./esmf
