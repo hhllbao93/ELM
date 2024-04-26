@@ -124,3 +124,46 @@ Compile the code using build_WRF.sh
 ```
     sh build_WRF.sh
 ```
+
+## RUN WRF-ELM
+Copy necessary namelist for ELM to WRF run directory
+
+lnd_in: This is the main namelist input file for CTSM
+
+lnd_modelio.nml: This sets CTSM’s PIO (parallel I/O library) configuration settings
+
+lilac_in: This namelist controls the operation of LILAC
+
+The surfacedata, mesh file, and domain file needs to be interpolated to WRF grids (e.g. geo_em.d01.nc)
+
+Sample script to run WRF-ELM on Perlmutter
+```
+#!/bin/bash
+#SBATCH --qos=regular
+#SBATCH --time=12:00:00
+#SBATCH --nodes=10
+#SBATCH --ntasks-per-node=128
+###SBATCH --cpus-per-task=1
+#SBATCH -C cpu
+#SBATCH --account=m3878
+
+##export OMP_PROC_BIND=spread
+##export OMP_PLACES=threads
+##export OMP_NUM_THREADS=8
+module load cpu
+module load cmake
+module load PrgEnv-gnu
+#module load gcc/11.2.0
+module load cray-hdf5-parallel/1.12.2.3
+module load cray-netcdf-hdf5parallel/4.9.0.3
+module load cray-parallel-netcdf
+module load cray-mpich/8.1.25
+module load libfabric
+
+###export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:${MPICH_DIR}/lib
+export MPI_C_LIBRARIES=${MPICH_DIR}/lib/libmpich.a
+export MPI_Fortran_LIBRARIES=${MPICH_DIR}/lib/libmpichf90.a
+export LD_LIBRARY_PATH=/opt/nvidia/hpc_sdk/Linux_x86_64/21.11/REDIST/cuda/11.5/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
+
+srun wrf.exe
+```
